@@ -81,10 +81,11 @@
       <input class="input" id="file" name="file" type="file" accept=".xlsx,.csv" required>
       <p class="hint">
         One row per unit, with a header row:
-        <strong>Item</strong>, <strong>Model</strong>, <strong>Asset/EAM No.</strong>, <strong>S/N</strong>.
+        <strong>Item</strong>, <strong>Model</strong>, <strong>S/N</strong>, <strong>Asset/EAM No.</strong>.
         <strong>Item</strong> is the category (e.g. Printer, PC, Laptop, Monitor) and
         <strong>Model</strong> is the exact product — rows with the same Item + Model group
-        under one item. Model and one code column are required.
+        under one item. Model is required, and <strong>at least one of S/N or Asset/EAM No.</strong>
+        — new stock often has only an S/N; leave EAM blank until tagged.
         <strong>Brand</strong>, <strong>Funding</strong>, <strong>Project</strong>,
         <strong>Project Code</strong> and <strong>Site</strong> (Site A or Site B — blank
         means Site B) columns are optional.
@@ -122,8 +123,8 @@
         <th class="num">Row</th>
         <th>Item</th>
         <th>Model</th>
-        <th>Asset/EAM No.</th>
         <th>S/N</th>
+        <th>Asset/EAM No.</th>
         <th>Brand</th>
         <th>Funding</th>
         <th>Project</th>
@@ -139,8 +140,8 @@
         <td class="num muted">{{ e["row"] }}</td>
         <td>{{ e["item"] or '—' }}</td>
         <td>{{ e["model"] or '—' }}</td>
-        <td class="mono">{{ e["eam"] or '—' }}</td>
         <td class="mono">{{ e["serial"] or '—' }}</td>
+        <td class="mono">{{ e["eam"] or '—' }}</td>
         <td>{{ e["brand"] or '—' }}</td>
         <td>{{ e["funding"] or '—' }}</td>
         <td>{{ e["project"] or '—' }}</td>

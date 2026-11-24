@@ -10,24 +10,25 @@
     Fix the identifiers on this physical unit. At least one of S/N or EAM number is required,
     and each must be unique across the whole storeroom.
     {% else %}
-    Register one physical “{{ item_name }}” with its own serial number and EAM tag. It starts
-    on the shelf (in stock) and an “IN — registered” movement is recorded. Tip: with a barcode
-    scanner you can register new units directly on the Stock In page instead.
+    Register one physical “{{ item_name }}” with at least an S/N or an EAM number
+    (new stock often has only an S/N — EAM can be added later). It starts on the shelf
+    (in stock) and an “IN — registered” movement is recorded. Tip: with a barcode scanner
+    you can register new units directly on the Stock In page instead.
     {% endif %}
   </p>
   <form method="post" class="form-grid">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <div class="field">
-      <label for="eam_no">Asset/EAM number</label>
-      <input class="input mono" id="eam_no" name="eam_no" maxlength="60"
-             value="{{ form.get('eam_no', unit['eam_no'] if editing else '') }}" placeholder="EAM-1013">
-      <p class="hint">The asset tag on the unit — unique per unit.</p>
-    </div>
-    <div class="field">
       <label for="serial_no">Serial number (S/N)</label>
       <input class="input mono" id="serial_no" name="serial_no" maxlength="60"
              value="{{ form.get('serial_no', unit['serial_no'] if editing else '') }}" placeholder="SN-DL5440-0113">
-      <p class="hint">The manufacturer serial, also unique per unit.</p>
+      <p class="hint">Manufacturer serial — unique. Enough on its own for new stock.</p>
+    </div>
+    <div class="field">
+      <label for="eam_no">Asset/EAM number <span class="muted">(optional if S/N is set)</span></label>
+      <input class="input mono" id="eam_no" name="eam_no" maxlength="60"
+             value="{{ form.get('eam_no', unit['eam_no'] if editing else '') }}" placeholder="EAM-1013">
+      <p class="hint">Asset tag — unique. Leave blank until the unit is tagged.</p>
     </div>
     <div class="field">
       <label for="funding">Funding (optional)</label>

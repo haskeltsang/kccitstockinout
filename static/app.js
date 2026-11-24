@@ -149,7 +149,7 @@
   //          {kind:'new', itemId, name, serial, eam}
   //          {kind:'bulk', itemId, name, sku, stock, count}
   var entries = [];
-  var scanMode = "eam"; // unknown scanned codes land in this field for new units
+  var scanMode = "serial"; // new stock usually has S/N first; EAM is optional
 
   function beep(ok) {
     try {

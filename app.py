@@ -638,7 +638,7 @@ def site_for(raw):
 
 
 IMPORT_TEMPLATE_HEADERS = [
-    "Item", "Model", "Asset/EAM No.", "S/N", "Brand", "Funding", "Project", "Project Code", "Site",
+    "Item", "Model", "S/N", "Asset/EAM No.", "Brand", "Funding", "Project", "Project Code", "Site",
 ]
 IMPORT_TEMPLATE_SAMPLE = [
 
@@ -967,7 +967,10 @@ def import_stocks():
                                "by quantity on the Import page",
                     )
                 elif not eam and not serial:
-                    entry.update(result="error", detail="Needs an Asset/EAM no. or an S/N")
+                    entry.update(
+                        result="error",
+                        detail="Needs an S/N or an Asset/EAM no. (either one — EAM can be blank)",
+                    )
                 elif row["site"].strip() and not site:
                     entry.update(
                         result="error",

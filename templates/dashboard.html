@@ -10,7 +10,7 @@
   <div class="card empty">
     <svg class="empty-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 9.2 12 6.7l4.5 2.5v5.3L12 17l-4.5-2.5z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M7.5 9.2 12 11.7l4.5-2.5M12 11.7V17" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
     <h2>Your storeroom is empty</h2>
-    <p class="muted">Import your asset list from Excel — each row (item, model, asset/EAM no., S/N) becomes one tracked unit. Then record stock moving in and out as equipment is handed to colleagues and returned.</p>
+    <p class="muted">Import your asset list from Excel — each row (item, model, and an S/N or EAM) becomes one tracked unit. Then record stock moving in and out as equipment is handed to colleagues and returned.</p>
     <a class="btn btn-primary" href="{{ url_for('import_stocks') }}">Import from Excel</a>
   </div>
 {% else %}
