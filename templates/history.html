@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}History{% endblock %}
+{% block heading %}Transaction history{% endblock %}
+{% block actions %}
+  <a class="btn btn-ghost" href="{{ url_for('history_csv') }}?{{ request.query_string.decode() }}">Export CSV</a>
+{% endblock %}
+{% block content %}
+<form class="toolbar" method="get" action="{{ url_for('history') }}">
+  <div class="search">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m15.5 15.5 4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+    <input class="input" type="search" name="q" value="{{ q }}" placeholder="Search item, person, staff ID, department, reference…">
+  </div>
+  <select class="input" name="type">
+    <option value="" {{ 'selected' if not tx_type }}>All types</option>
+    <option value="IN" {{ 'selected' if tx_type == 'IN' }}>Stock in</option>
+    <option value="OUT" {{ 'selected' if tx_type == 'OUT' }}>Stock out</option>
+  </select>
+  <input class="input" type="date" name="date_from" value="{{ date_from }}" aria-label="From date">
+  <input class="input" type="date" name="date_to" value="{{ date_to }}" aria-label="To date">
+  <button class="btn btn-ghost" type="submit">Filter</button>
+  {% if q or tx_type or date_from or date_to %}<a class="btn btn-link" href="{{ url_for('history') }}">Reset</a>{% endif %}
+</form>
+
+{% if rows %}
+<div class="card table-card">
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Date</th><th>Type</th><th>Item</th><th>EAM/Asset No.</th><th class="num">Qty</th>
+        <th>Person</th><th>Department</th><th>Reference</th><th>Site</th><th>Staff ID</th><th>Notes</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for t in rows %}
+      <tr>
+        <td class="nowrap">{{ t["created_at"] }}</td>
+        <td><span class="pill {{ 'pill-in' if t["type"] == 'IN' else 'pill-out' }}">{{ 'In' if t["type"] == 'IN' else 'Out' }}</span>{% if t["on_loan"] %}<span class="pill pill-loan">On loan</span>{% endif %}{% if t["condemned"] %}<span class="pill pill-condemn">Condemned</span>{% endif %}</td>
+        <td><a class="item-name" href="{{ url_for('item_detail', item_id=t["item_id"]) }}">{{ t["item_name"] }}</a></td>
+        <td class="mono">{{ t["unit_eam"] or t["unit_serial"] or '—' }}</td>
+        <td class="num"><span class="{{ 'qty-in' if t["type"] == 'IN' else 'qty-out' }}">{{ '+' if t["type"] == 'IN' else '−' }}{{ t["quantity"] }}</span></td>
+        <td>{{ t["person"] or '—' }}</td>
+        <td>{{ t["department"] or '—' }}</td>
+        <td class="mono">{{ t["reference"] or '—' }}</td>
+        <td>{{ t["site"] or '—' }}</td>
+        <td class="mono">{{ t["staff_id"] or '—' }}</td>
+        <td class="muted">{{ t["notes"] or '—' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<div class="pagination">
+  <span class="muted small">{{ total }} transaction{{ 's' if total != 1 }} · page {{ page }} of {{ pages }}</span>
+  <div class="page-btns">
+    {% if page > 1 %}
+    <a class="btn btn-sm btn-ghost" href="{{ url_for('history', q=q, type=tx_type, date_from=date_from, date_to=date_to, page=page - 1) }}">&larr; Prev</a>
+    {% endif %}
+    {% if page < pages %}
+    <a class="btn btn-sm btn-ghost" href="{{ url_for('history', q=q, type=tx_type, date_from=date_from, date_to=date_to, page=page + 1) }}">Next &rarr;</a>
+    {% endif %}
+  </div>
+</div>
+{% else %}
+<div class="card empty">
+  <h2>No transactions found</h2>
+  {% if q or tx_type or date_from or date_to %}
+  <p class="muted">Nothing matches these filters. Try widening the date range or clearing the search.</p>
+  <a class="btn btn-ghost" href="{{ url_for('history') }}">Clear filters</a>
+  {% else %}
+  <p class="muted">Stock movements will appear here as you record them.</p>
+  <a class="btn btn-primary" href="{{ url_for('stock_in') }}">Record the first stock in</a>
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}

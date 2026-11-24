@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% set editing = unit is not none %}
+{% set item_name = item["name"] if item else unit["item_name"] %}
+{% block title %}{{ 'Edit unit' if editing else 'Register unit' }}{% endblock %}
+{% block heading %}{{ 'Edit unit' if editing else 'Register a unit' }} — {{ item_name }}{% endblock %}
+{% block content %}
+<div class="card form-card">
+  <p class="muted form-intro">
+    {% if editing %}
+    Fix the identifiers on this physical unit. At least one of S/N or EAM number is required,
+    and each must be unique across the whole storeroom.
+    {% else %}
+    Register one physical “{{ item_name }}” with its own serial number and EAM tag. It starts
+    on the shelf (in stock) and an “IN — registered” movement is recorded. Tip: with a barcode
+    scanner you can register new units directly on the Stock In page instead.
+    {% endif %}
+  </p>
+  <form method="post" class="form-grid">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <div class="field">
+      <label for="eam_no">Asset/EAM number</label>
+      <input class="input mono" id="eam_no" name="eam_no" maxlength="60"
+             value="{{ form.get('eam_no', unit['eam_no'] if editing else '') }}" placeholder="EAM-1013">
+      <p class="hint">The asset tag on the unit — unique per unit.</p>
+    </div>
+    <div class="field">
+      <label for="serial_no">Serial number (S/N)</label>
+      <input class="input mono" id="serial_no" name="serial_no" maxlength="60"
+             value="{{ form.get('serial_no', unit['serial_no'] if editing else '') }}" placeholder="SN-DL5440-0113">
+      <p class="hint">The manufacturer serial, also unique per unit.</p>
+    </div>
+    <div class="field">
+      <label for="funding">Funding (optional)</label>
+      <input class="input" id="funding" name="funding" maxlength="80"
+             value="{{ form.get('funding', unit['funding'] if editing else '') }}"
+             placeholder="e.g. IT Operating Budget">
+    </div>
+    <div class="field">
+      <label for="project">Project (optional)</label>
+      <input class="input" id="project" name="project" maxlength="80"
+             value="{{ form.get('project', unit['project'] if editing else '') }}"
+             placeholder="e.g. Campus Refresh">
+    </div>
+    <div class="field">
+      <label for="project_code">Project code (optional)</label>
+      <input class="input mono" id="project_code" name="project_code" maxlength="40"
+             value="{{ form.get('project_code', unit['project_code'] if editing else '') }}"
+             placeholder="e.g. PRJ-2026-14">
+    </div>
+    <div class="field">
+      <label for="site">Site</label>
+      {% set cur_site = form.get('site', unit['site'] if editing else 'Site A') %}
+      <select class="input" id="site" name="site">
+        <option value="Site A" {{ 'selected' if cur_site != 'Site B' }}>Site A</option>
+        <option value="Site B" {{ 'selected' if cur_site == 'Site B' }}>Site B</option>
+      </select>
+      <p class="hint">Which storeroom shelf this unit sits on.</p>
+    </div>
+    <div class="field span-2">
+      <label for="notes">Notes</label>
+      <textarea class="input" id="notes" name="notes" rows="2" maxlength="500"
+                placeholder="e.g. small scratch on lid">{{ form.get('notes', unit['notes'] if editing else '') }}</textarea>
+    </div>
+    <div class="form-actions span-2">
+      <a class="btn btn-ghost" href="{{ url_for('item_detail', item_id=item['id'] if item else unit['item_id']) }}">Cancel</a>
+      <button class="btn btn-primary" type="submit">{{ 'Save changes' if editing else 'Register unit' }}</button>
+    </div>
+  </form>
+</div>
+{% endblock %}

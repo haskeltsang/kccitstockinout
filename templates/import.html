@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+{% block title %}Import stock{% endblock %}
+{% block heading %}Add stock{% endblock %}
+{% block content %}
+<div class="card form-card">
+  <p class="muted form-intro">
+    Keyboards and mice have no asset tags — add them by quantity.
+    Everything else is tracked per unit and comes in from an Excel or CSV file.
+  </p>
+  <div class="import-mode" role="radiogroup" aria-label="What are you adding?">
+    <label class="import-mode-opt">
+      <input type="radio" name="import_mode" value="accessory" checked>
+      <span>Mouse / Keyboard</span>
+    </label>
+    <label class="import-mode-opt">
+      <input type="radio" name="import_mode" value="excel">
+      <span>Other items (Excel / CSV)</span>
+    </label>
+  </div>
+</div>
+
+<div class="card form-card" id="accessory-panel">
+  <div class="card-head"><h2>Add keyboards or mice by quantity</h2></div>
+  <form method="post" class="form-grid">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="mode" value="accessory">
+    <div class="field">
+      <label for="accessory-type">Type <span class="req">*</span></label>
+      <select class="input" id="accessory-type" name="accessory_type">
+        <option value="mouse" selected>Mouse</option>
+        <option value="keyboard">Keyboard</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="connection">Connection <span class="req">*</span></label>
+      <select class="input" id="connection" name="connection">
+        <option value="wired" selected>Wired</option>
+        <option value="wireless">Wireless</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="qty">Quantity to add <span class="req">*</span></label>
+      <input class="input" type="number" id="qty" name="qty" min="1" max="10000" step="1" value="1" required>
+    </div>
+    <div class="field">
+      <label for="acc-site">Stock in to site</label>
+      <select class="input" id="acc-site" name="site">
+        <option value="Site B" selected>Site B</option>
+        <option value="Site A">Site A</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="acc-reference">Reference (optional)</label>
+      <input class="input mono" id="acc-reference" name="reference" maxlength="60" placeholder="e.g. PO-2026-052">
+    </div>
+    <div class="field span-2">
+      <label for="acc-notes">Notes (optional)</label>
+      <input class="input" id="acc-notes" name="notes" maxlength="500" placeholder="e.g. received from IT supplier">
+      <p class="hint">Each type is one item — Mouse (Wired), Mouse (Wireless), Keyboard (Wired),
+        Keyboard (Wireless) — created the first time you add it. On the Stock In / Out pages,
+        move them by typing their SKU: MS-WIRED, MS-WIRELESS, KB-WIRED or KB-WIRELESS.</p>
+    </div>
+    <div class="form-actions span-2">
+      <button class="btn btn-primary" type="submit">Add to stock</button>
+    </div>
+  </form>
+</div>
+
+<div class="card form-card" id="excel-panel">
+  <div class="card-head"><h2>Import tracked assets from Excel</h2></div>
+  <p class="muted form-intro">
+    Upload your asset list and every row becomes one tracked unit in the storeroom —
+    no need to set up items first. Rows whose Asset/EAM no. or S/N is already
+    registered are skipped, so re-importing the same file is safe.
+  </p>
+  <form method="post" enctype="multipart/form-data" class="form-grid">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="mode" value="excel">
+    <div class="field span-2">
+      <label for="file">Excel or CSV file <span class="req">*</span></label>
+      <input class="input" id="file" name="file" type="file" accept=".xlsx,.csv" required>
+      <p class="hint">
+        One row per unit, with a header row:
+        <strong>Item</strong>, <strong>Model</strong>, <strong>Asset/EAM No.</strong>, <strong>S/N</strong>.
+        <strong>Item</strong> is the category (e.g. Printer, PC, Laptop, Monitor) and
+        <strong>Model</strong> is the exact product — rows with the same Item + Model group
+        under one item. Model and one code column are required.
+        <strong>Brand</strong>, <strong>Funding</strong>, <strong>Project</strong>,
+        <strong>Project Code</strong> and <strong>Site</strong> (Site A or Site B — blank
+        means Site B) columns are optional.
+        Format code columns as <em>Text</em> in Excel so leading zeros are kept.
+        Keyboards and mice are not imported here — use the quantity form above.
+      </p>
+    </div>
+    <div class="field span-2">
+      <label for="reference">Reference for this batch (optional)</label>
+      <input class="input mono" id="reference" name="reference" maxlength="60" placeholder="e.g. PO-2026-052">
+      <p class="hint">Recorded on every imported row in the history — for example the PO the assets came in on.</p>
+    </div>
+    <div class="form-actions span-2">
+      <a class="btn btn-ghost" href="{{ url_for('import_template_xlsx') }}">Download Excel template</a>
+      <a class="btn btn-ghost" href="{{ url_for('import_template_csv') }}">CSV template</a>
+      <button class="btn btn-primary" type="submit">Import</button>
+    </div>
+  </form>
+</div>
+
+{% if report %}
+<div class="card table-card">
+  <div class="card-head">
+    <h2>Import result</h2>
+    <div>
+      <span class="pill pill-in">{{ counts["imported"] }} imported</span>
+      {% if counts["skipped"] %}<span class="pill pill-out">{{ counts["skipped"] }} skipped</span>{% endif %}
+      {% if counts["errors"] %}<span class="pill pill-low">{{ counts["errors"] }} errors</span>{% endif %}
+    </div>
+  </div>
+  <div class="table-scroll">
+  <table class="table">
+    <thead>
+      <tr>
+        <th class="num">Row</th>
+        <th>Item</th>
+        <th>Model</th>
+        <th>Asset/EAM No.</th>
+        <th>S/N</th>
+        <th>Brand</th>
+        <th>Funding</th>
+        <th>Project</th>
+        <th>Project Code</th>
+        <th>Site</th>
+        <th>Result</th>
+        <th>Detail</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for e in report %}
+      <tr>
+        <td class="num muted">{{ e["row"] }}</td>
+        <td>{{ e["item"] or '—' }}</td>
+        <td>{{ e["model"] or '—' }}</td>
+        <td class="mono">{{ e["eam"] or '—' }}</td>
+        <td class="mono">{{ e["serial"] or '—' }}</td>
+        <td>{{ e["brand"] or '—' }}</td>
+        <td>{{ e["funding"] or '—' }}</td>
+        <td>{{ e["project"] or '—' }}</td>
+        <td class="mono">{{ e["project_code"] or '—' }}</td>
+        <td>{{ e["site"] or '—' }}</td>
+        <td>
+          {% if e["result"] == "imported" %}<span class="pill pill-in">Imported</span>
+          {% elif e["result"] == "skipped" %}<span class="pill pill-out">Skipped</span>{% else %}<span class="pill pill-low">Error</span>{% endif %}
+        </td>
+        <td class="muted">{{ e["detail"] }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

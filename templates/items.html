@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}Items{% endblock %}
+{% block heading %}Items{% endblock %}
+{% block actions %}
+  <a class="btn btn-ghost" href="{{ url_for('items_csv') }}">Export CSV</a>
+  <a class="btn btn-primary" href="{{ url_for('import_stocks') }}">Import from Excel</a>
+{% endblock %}
+{% block content %}
+<form class="toolbar" method="get" action="{{ url_for('items') }}">
+  <div class="search">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m15.5 15.5 4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+    <input class="input" type="search" name="q" value="{{ q }}" placeholder="Search model, category, location or asset code…">
+  </div>
+  <select class="input" name="category">
+    <option value="">All categories</option>
+    {% for c in cats %}<option value="{{ c }}" {{ 'selected' if c == category }}>{{ c }}</option>{% endfor %}
+  </select>
+  <button class="btn btn-ghost" type="submit">Filter</button>
+  {% if q or category %}<a class="btn btn-link" href="{{ url_for('items') }}">Reset</a>{% endif %}
+</form>
+
+{% if items %}
+<div class="card table-card">
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Item</th><th>SKU</th><th>Category</th><th>Location</th>
+        <th class="num">In stock</th><th class="num">Min</th><th class="actions-col">Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for it in items %}
+      {% set available = it["quantity"] + it["units_in"] %}
+      {% set is_low = it["min_quantity"] > 0 and available <= it["min_quantity"] %}
+      <tr>
+        <td>
+          <a class="item-name" href="{{ url_for('item_detail', item_id=it["id"]) }}">{{ it["name"] }}</a>
+          {% if it["brand"] or it["model"] %}<div class="muted small">{{ it["brand"] }} {{ it["model"] }}</div>{% endif %}
+        </td>
+        <td class="mono">{{ it["sku"] or '—' }}</td>
+        <td><span class="chip">{{ it["category"] }}</span></td>
+        <td>{{ it["location"] or '—' }}</td>
+        <td class="num">
+          <span class="qty {{ 'qty-low' if is_low else '' }}">{{ available }}</span>
+          {% if is_low %}<span class="pill pill-low">Low</span>{% endif %}
+          {% if it["units_in"] or it["units_out"] %}
+          <div class="muted small">{{ it["units_in"] }} tracked{% if it["units_out"] %} · {{ it["units_out"] }} out{% endif %}</div>
+          {% endif %}
+        </td>
+        <td class="num muted">{{ it["min_quantity"] or '—' }}</td>
+        <td class="actions-col">
+          <div class="row-actions">
+            <a class="btn btn-sm btn-ghost" href="{{ url_for('stock_in', item_id=it["id"]) }}">In</a>
+            <a class="btn btn-sm btn-ghost" href="{{ url_for('stock_out', item_id=it["id"]) }}">Out</a>
+            <form method="post" action="{{ url_for('delete_item', item_id=it["id"]) }}" data-confirm="Delete “{{ it['name'] }}” and all of its transaction history?">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <button class="btn btn-sm btn-danger-ghost" type="submit">Delete</button>
+            </form>
+          </div>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="card empty">
+  <h2>No items found</h2>
+  {% if q or category %}
+  <p class="muted">Nothing matches your search. Try different keywords or clear the filters.</p>
+  <a class="btn btn-ghost" href="{{ url_for('items') }}">Clear filters</a>
+  {% else %}
+  <p class="muted">Import your asset list from Excel — every row becomes one tracked unit, no item setup needed.</p>
+  <a class="btn btn-primary" href="{{ url_for('import_stocks') }}">Import from Excel</a>
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}

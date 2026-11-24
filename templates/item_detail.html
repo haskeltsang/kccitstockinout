@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+{% set total = item["quantity"] + counts["units_in"] %}
+{% set is_low = item["min_quantity"] > 0 and total <= item["min_quantity"] %}
+{% block title %}{{ item["name"] }}{% endblock %}
+{% block heading %}{{ item["name"] }}{% endblock %}
+{% block actions %}
+  <a class="btn btn-ghost" href="{{ url_for('new_unit', item_id=item["id"]) }}">Register unit</a>
+  <a class="btn btn-ghost" href="{{ url_for('stock_out', item_id=item["id"]) }}">Stock out</a>
+  <a class="btn btn-primary" href="{{ url_for('stock_in', item_id=item["id"]) }}">Stock in</a>
+{% endblock %}
+{% block content %}
+<div class="detail-grid">
+  <section class="card">
+    <div class="card-head">
+      <h2>Details</h2>
+      {% if is_low %}<span class="pill pill-low">Low stock</span>{% endif %}
+    </div>
+    <dl class="meta">
+      <div><dt>Category</dt><dd><span class="chip">{{ item["category"] }}</span></dd></div>
+      <div><dt>Model</dt><dd>{{ item["model"] or '—' }}</dd></div>
+      {% if item["sku"] %}<div><dt>SKU</dt><dd class="mono">{{ item["sku"] }}</dd></div>{% endif %}
+      {% if item["brand"] %}<div><dt>Brand</dt><dd>{{ item["brand"] }}</dd></div>{% endif %}
+      {% if item["location"] %}<div><dt>Location</dt><dd>{{ item["location"] }}</dd></div>{% endif %}
+      {% if item["notes"] %}<div><dt>Notes</dt><dd>{{ item["notes"] }}</dd></div>{% endif %}
+    </dl>
+    <form method="post" action="{{ url_for('set_min_level', item_id=item["id"]) }}" class="minlevel-form">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <label for="min_quantity">Low-stock warning level</label>
+      <div class="minlevel-row">
+        <input class="input" type="number" id="min_quantity" name="min_quantity"
+               min="0" max="100000" step="1" value="{{ item["min_quantity"] }}">
+        <button class="btn btn-ghost" type="submit">Save</button>
+      </div>
+      <p class="hint">The dashboard alerts you when available stock (untagged + tagged units on
+        the shelf) drops to this number or below. 0 turns the alert off.</p>
+    </form>
+  </section>
+  <div class="stat-col">
+    <div class="card stat">
+      <span class="stat-label">In stock</span>
+      <span class="stat-value {{ 'danger' if is_low }}">{{ total }}</span>
+      <span class="stat-sub">warning level {{ item["min_quantity"] }}</span>
+    </div>
+    <div class="card stat">
+      <span class="stat-label">Tracked units</span>
+      <span class="stat-value">{{ counts["units_in"] }}</span>
+      <span class="stat-sub">{{ counts["units_out"] }} checked out{% if counts["units_loan"] %} · {{ counts["units_loan"] }} on loan{% endif %}</span>
+    </div>
+    <div class="card stat">
+      <span class="stat-label">Untagged stock</span>
+      <span class="stat-value">{{ item["quantity"] }}</span>
+      <span class="stat-sub">no S/N · EAM</span>
+    </div>
+  </div>
+</div>
+
+<section class="card table-card">
+  <div class="card-head">
+    <h2>Tracked units</h2>
+    <a class="btn btn-sm btn-ghost" href="{{ url_for('new_unit', item_id=item["id"]) }}">Register unit</a>
+  </div>
+  {% if units %}
+  <div class="unit-filter">
+    <input class="input" type="search" id="unit-filter-q"
+           placeholder="Filter EAM, S/N, holder, funding, stocked-in time, notes…" aria-label="Filter tracked units">
+    <select class="input" id="unit-filter-year" aria-label="Filter by stocked-in year">
+      <option value="">All years</option>
+    </select>
+    <div class="mode-toggle" id="unit-filter-status">
+      <button type="button" class="mode-btn active" data-status="">All</button>
+      <button type="button" class="mode-btn" data-status="in_stock">On shelf</button>
+      <button type="button" class="mode-btn" data-status="checked_out">Checked out</button>
+    </div>
+    <div class="mode-toggle" id="unit-filter-condemn">
+      <button type="button" class="mode-btn active" data-condemn="">All</button>
+      <button type="button" class="mode-btn" data-condemn="1">Condemned</button>
+      <button type="button" class="mode-btn" data-condemn="0">Not condemned</button>
+    </div>
+    <span class="muted small" id="unit-filter-count"></span>
+  </div>
+  <table class="table" id="units-table">
+    <thead>
+      <tr><th>Asset/EAM no.</th><th>S/N</th><th>Site</th><th>Status</th><th>Holder</th><th>Funding / Project</th><th>Stocked in</th><th>Notes</th><th class="actions-col"></th></tr>
+    </thead>
+    <tbody>
+      {% for u in units %}
+      <tr data-status="{{ u["status"] }}"
+          data-condemned="{{ 1 if u['condemned'] else 0 }}"
+          data-stocked-year="{{ u['stocked_in_at'][:4] if u['stocked_in_at'] else '' }}">
+        <td class="mono">{{ u["eam_no"] or '—' }}</td>
+        <td class="mono">{{ u["serial_no"] or '—' }}</td>
+        <td>{{ u["site"] or '—' }}</td>
+        <td>
+          {% if u["status"] == 'in_stock' %}
+          <span class="pill pill-in">On shelf</span>
+          {% else %}
+          <span class="pill pill-out">Checked out</span>
+          {% if u["on_loan"] %}<span class="pill pill-loan">On loan</span>{% endif %}
+          {% endif %}
+          {% if u["condemned"] %}<span class="pill pill-condemn">Condemned</span>{% endif %}
+        </td>
+        <td>{{ u["holder"] if u["status"] == 'checked_out' and u["holder"] else '—' }}</td>
+        <td class="muted">{{ [u["funding"], u["project"], u["project_code"]] | select | join(' · ') or '—' }}</td>
+        <td class="nowrap muted">{{ u["stocked_in_at"] or '—' }}</td>
+        <td class="muted">{{ u["notes"] or '—' }}</td>
+        <td class="actions-col">
+          <div class="row-actions">
+            <a class="btn btn-sm btn-ghost" href="{{ url_for('edit_unit', unit_id=u["id"]) }}">Edit</a>
+            <form method="post" action="{{ url_for('delete_unit', unit_id=u["id"]) }}" data-confirm="Delete unit {{ u['eam_no'] or u['serial_no'] }}? Its past movements stay in history.">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <button class="btn btn-sm btn-danger-ghost" type="submit">Delete</button>
+            </form>
+          </div>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted pad">No individually tagged units. Register units as they arrive — scan their
+    EAM tag or serial number on the Stock In page, or use Register unit.</p>
+  {% endif %}
+</section>
+
+<section class="card table-card">
+  <div class="card-head"><h2>Movement history</h2></div>
+  {% if history %}
+  <table class="table">
+    <thead>
+      <tr><th>Date</th><th>Type</th><th>EAM/Asset No.</th><th class="num">Qty</th><th>Person</th><th>Department</th><th>Reference</th><th>Notes</th></tr>
+    </thead>
+    <tbody>
+      {% for t in history %}
+      <tr>
+        <td class="nowrap">{{ t["created_at"] }}</td>
+        <td><span class="pill {{ 'pill-in' if t["type"] == 'IN' else 'pill-out' }}">{{ 'In' if t["type"] == 'IN' else 'Out' }}</span>{% if t["on_loan"] %}<span class="pill pill-loan">On loan</span>{% endif %}{% if t["condemned"] %}<span class="pill pill-condemn">Condemned</span>{% endif %}</td>
+        <td class="mono">{{ t["unit_eam"] or t["unit_serial"] or '—' }}</td>
+        <td class="num"><span class="{{ 'qty-in' if t["type"] == 'IN' else 'qty-out' }}">{{ '+' if t["type"] == 'IN' else '−' }}{{ t["quantity"] }}</span></td>
+        <td>{{ t["person"] or '—' }}</td>
+        <td>{{ t["department"] or '—' }}</td>
+        <td class="mono">{{ t["reference"] or '—' }}</td>
+        <td class="muted">{{ t["notes"] or '—' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted pad">No movements recorded for this item yet.</p>
+  {% endif %}
+</section>
+{% endblock %}

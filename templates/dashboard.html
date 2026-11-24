@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block heading %}Dashboard{% endblock %}
+{% block actions %}
+  <a class="btn btn-ghost" href="{{ url_for('stock_out') }}">Record stock out</a>
+  <a class="btn btn-primary" href="{{ url_for('stock_in') }}">Record stock in</a>
+{% endblock %}
+{% block content %}
+{% if totals["items"] == 0 %}
+  <div class="card empty">
+    <svg class="empty-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 9.2 12 6.7l4.5 2.5v5.3L12 17l-4.5-2.5z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="M7.5 9.2 12 11.7l4.5-2.5M12 11.7V17" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
+    <h2>Your storeroom is empty</h2>
+    <p class="muted">Import your asset list from Excel — each row (item, model, asset/EAM no., S/N) becomes one tracked unit. Then record stock moving in and out as equipment is handed to colleagues and returned.</p>
+    <a class="btn btn-primary" href="{{ url_for('import_stocks') }}">Import from Excel</a>
+  </div>
+{% else %}
+  <div class="stat-grid">
+    <div class="card stat">
+      <span class="stat-label">Items tracked</span>
+      <span class="stat-value">{{ totals["items"] }}</span>
+      <span class="stat-sub">distinct products</span>
+    </div>
+    <div class="card stat">
+      <span class="stat-label">Units on the shelf</span>
+      <span class="stat-value">{{ totals["units"] }}</span>
+      <span class="stat-sub">across all items</span>
+    </div>
+    <div class="card stat">
+      <span class="stat-label">Low-stock alerts</span>
+      <span class="stat-value {{ 'danger' if low | length > 0 }}">{{ low | length }}</span>
+      <span class="stat-sub">at or below minimum</span>
+    </div>
+    <div class="card stat">
+      <span class="stat-label">Checked out this month</span>
+      <span class="stat-value">{{ month_out["units"] }}</span>
+      <span class="stat-sub">{{ month_out["moves"] }} hand-outs</span>
+    </div>
+  </div>
+
+  {% if on_shelf %}
+  <div class="section-label">
+    <h2>Units on the shelf</h2>
+    <span class="muted small">{{ on_shelf | length }} product{{ 's' if on_shelf | length != 1 }} with tracked units</span>
+  </div>
+  <div class="stat-grid shelf-stats">
+    {% for it in on_shelf %}
+    <a class="card stat shelf-stat" href="{{ url_for('item_detail', item_id=it["id"]) }}">
+      <span class="stat-label">{{ it["name"] }}</span>
+      <span class="stat-value {{ 'danger' if it["on_shelf"] == 0 }}">{{ it["on_shelf"] }}</span>
+      <span class="stat-sub">{{ it["category"] }}{% if it["brand"] %} · {{ it["brand"] }}{% endif %}{% if it["model"] %} · {{ it["model"] }}{% endif %} · on shelf</span>
+    </a>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <div class="dash-grid">
+    <section class="card table-card">
+      <div class="card-head">
+        <h2>Recent activity</h2>
+        <a class="btn btn-sm btn-ghost" href="{{ url_for('history') }}">View all</a>
+      </div>
+      {% if recent %}
+      <table class="table">
+        <thead>
+          <tr><th>Type</th><th>Item</th><th class="num">Qty</th><th>Who</th><th>When</th></tr>
+        </thead>
+        <tbody>
+          {% for t in recent %}
+          <tr>
+            <td><span class="pill {{ 'pill-in' if t["type"] == 'IN' else 'pill-out' }}">{{ 'In' if t["type"] == 'IN' else 'Out' }}</span></td>
+            <td>
+              <a class="item-name" href="{{ url_for('item_detail', item_id=t["item_id"]) }}">{{ t["item_name"] }}</a>
+              {% if t["unit_eam"] or t["unit_serial"] %}<div class="muted small mono">{{ t["unit_eam"] or t["unit_serial"] }}</div>{% endif %}
+            </td>
+            <td class="num"><span class="{{ 'qty-in' if t["type"] == 'IN' else 'qty-out' }}">{{ '+' if t["type"] == 'IN' else '−' }}{{ t["quantity"] }}</span></td>
+            <td>{{ t["person"] or '—' }}</td>
+            <td class="muted nowrap">{{ t["created_at"] }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="muted pad">No movements recorded yet.</p>
+      {% endif %}
+    </section>
+
+    <aside class="dash-side">
+      <section class="card">
+        <div class="card-head"><h2>Low stock</h2></div>
+        {% if low %}
+        <ul class="low-list">
+          {% for it in low %}
+          <li>
+            <div class="low-info">
+              <a class="item-name" href="{{ url_for('item_detail', item_id=it["id"]) }}">{{ it["name"] }}</a>
+              <span class="muted small">{{ it["quantity"] }} left · minimum {{ it["min_quantity"] }}</span>
+            </div>
+            <a class="btn btn-sm btn-primary" href="{{ url_for('stock_in', item_id=it["id"]) }}">Restock</a>
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <p class="muted">Everything is above its minimum level.</p>
+        {% endif %}
+      </section>
+
+      <section class="card">
+        <div class="card-head"><h2>Stock by category</h2></div>
+        {% for c in categories %}
+        <div class="cat-row">
+          <span class="cat-name">{{ c["name"] }}</span>
+          <div class="bar"><div class="bar-fill" style="width: {{ c['pct'] }}%"></div></div>
+          <span class="cat-units">{{ c["units"] }}</span>
+        </div>
+        {% endfor %}
+      </section>
+    </aside>
+  </div>
+{% endif %}
+{% endblock %}

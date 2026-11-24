@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}Account{% endblock %}
+{% block heading %}Account{% endblock %}
+{% block content %}
+<div class="account-grid">
+  <section class="card form-card">
+    <div class="card-head"><h2>Change your password</h2></div>
+    <form method="post" class="form-grid" action="{{ url_for('account') }}">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <div class="field span-2">
+        <label for="current_password">Current password <span class="req">*</span></label>
+        <input class="input" id="current_password" name="current_password" type="password"
+               maxlength="200" autocomplete="current-password" required>
+      </div>
+      <div class="field">
+        <label for="new_password">New password <span class="req">*</span></label>
+        <input class="input" id="new_password" name="new_password" type="password"
+               maxlength="200" autocomplete="new-password" required>
+        <p class="hint">At least 8 characters.</p>
+      </div>
+      <div class="field">
+        <label for="confirm_password">Confirm new password <span class="req">*</span></label>
+        <input class="input" id="confirm_password" name="confirm_password" type="password"
+               maxlength="200" autocomplete="new-password" required>
+      </div>
+      <div class="form-actions span-2">
+        <button class="btn btn-primary" type="submit">Change password</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="card table-card">
+    <div class="card-head"><h2>Logins</h2><span class="muted small">{{ users | length }} account{{ 's' if users | length != 1 }}</span></div>
+    <table class="table">
+      <thead>
+        <tr><th>Username</th><th>Created</th><th class="actions-col"></th></tr>
+      </thead>
+      <tbody>
+        {% for u in users %}
+        <tr>
+          <td>
+            <span class="item-name">{{ u["username"] }}</span>
+            {% if u["id"] == session.get("user_id") %}<span class="pill pill-in">You</span>{% endif %}
+          </td>
+          <td class="muted">{{ u["created_at"] }}</td>
+          <td class="actions-col">
+            {% if u["id"] != session.get("user_id") %}
+            <form method="post" action="{{ url_for('delete_user', user_id=u["id"]) }}"
+                  data-confirm="Remove the login for “{{ u['username'] }}”? They will no longer be able to sign in.">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <button class="btn btn-sm btn-danger-ghost" type="submit">Remove</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <form method="post" class="form-grid add-user-form" action="{{ url_for('add_user') }}">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <div class="field">
+        <label for="add-username">Add a colleague <span class="req">*</span></label>
+        <input class="input" id="add-username" name="username" maxlength="40"
+               autocomplete="off" placeholder="Username" required>
+      </div>
+      <div class="field">
+        <label for="add-password">Temporary password <span class="req">*</span></label>
+        <input class="input" id="add-password" name="password" type="password" maxlength="200"
+               autocomplete="new-password" required>
+        <p class="hint">At least 8 characters — they should change it after signing in.</p>
+      </div>
+      <div class="field">
+        <label for="add-confirm">Confirm password <span class="req">*</span></label>
+        <input class="input" id="add-confirm" name="confirm" type="password" maxlength="200"
+               autocomplete="new-password" required>
+      </div>
+      <div class="form-actions span-2">
+        <button class="btn btn-primary" type="submit">Add login</button>
+      </div>
+    </form>
+  </section>
+</div>
+{% endblock %}

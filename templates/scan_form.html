@@ -1,0 +1,215 @@
+{% extends "base.html" %}
+{% set is_in = tx_type == 'IN' %}
+{% block title %}{{ 'Stock in' if is_in else 'Stock out' }}{% endblock %}
+{% block heading %}{{ 'Record stock in' if is_in else 'Record stock out' }}{% endblock %}
+{% block content %}
+{% if not items %}
+<div class="card empty">
+  <h2>No items yet</h2>
+  <p class="muted">Import your asset list from Excel before recording stock movements.</p>
+  <a class="btn btn-primary" href="{{ url_for('import_stocks') }}">Import from Excel</a>
+</div>
+{% else %}
+<div class="scan-layout {{ 'with-acc' if not is_in }}">
+  <section class="card scan-card scan-top">
+    <div class="field staff-field">
+      <label for="staff_id">Staff ID</label>
+      <input form="finish-form" class="input scan-input" id="staff_id" name="staff_id" maxlength="40"
+             placeholder="Your staff ID — or scan your staff card">
+    </div>
+    <div class="scan-box">
+      <label for="scan-input">Scan barcode</label>
+      <input id="scan-input" class="input scan-input" type="text" autocomplete="off" autofocus
+             placeholder="EAM no., S/N or accessory SKU">
+      <p class="hint">A barcode scanner works like a keyboard: it types the code and presses Enter.
+        Untagged keyboards and mice move by SKU — type MS-WIRED, MS-WIRELESS, KB-WIRED or KB-WIRELESS.</p>
+      <div id="scan-status" class="scan-status" role="status" aria-live="polite"></div>
+    </div>
+
+    {% if is_in %}
+    <div class="scan-options">
+      <span class="scan-opt-label">New codes are</span>
+      <div class="mode-toggle" id="mode-toggle">
+        <button type="button" class="mode-btn active" data-mode="eam">EAM no.</button>
+        <button type="button" class="mode-btn" data-mode="serial">S/N</button>
+      </div>
+      <label for="new-item-select" class="scan-opt-label">Register new units as</label>
+      <select id="new-item-select" class="input">
+        <option value="" selected disabled>Choose the product…</option>
+        {% for it in items %}
+        <option value="{{ it["id"] }}" data-name="{{ it["name"] }}">
+          {{ it["name"] }}{% if it["sku"] %} ({{ it["sku"] }}){% endif %}
+        </option>
+        {% endfor %}
+      </select>
+    </div>
+    {% endif %}
+  </section>
+
+  {% if not is_in %}
+  <section class="card accessory-out">
+    <span class="scan-opt-label">Keyboards &amp; mice — quantity to hand out</span>
+      {% for sku in ["MS-WIRED", "MS-WIRELESS", "KB-WIRED", "KB-WIRELESS"] %}
+      {% set it = items_by_sku.get(sku) %}
+      <div class="acc-row">
+        <label class="acc-name" for="acc-{{ sku|lower }}">{{ it["name"] if it else sku }}</label>
+        <span class="muted small">{{ it["quantity"] if it else 0 }} on hand</span>
+        <input class="input acc-qty" id="acc-{{ sku|lower }}" type="number"
+               min="0" max="{{ it["quantity"] if it else 0 }}" step="1" placeholder="0"
+               data-item-id="{{ it["id"] if it else "" }}"
+               data-name="{{ it["name"] if it else "" }}"
+               data-sku="{{ sku }}"
+               data-qty="{{ it["quantity"] if it else 0 }}"
+               {{ 'disabled' if not it or it["quantity"] == 0 }}>
+      </div>
+      {% endfor %}
+      <p class="hint">Top up keyboards and mice on the Import page.</p>
+  </section>
+  {% endif %}
+
+  <form method="post" class="card batch-card" id="finish-form" data-tx-type="{{ tx_type }}">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <div class="card-head">
+      <h2>Scanned items</h2>
+      <div class="batch-head-side">
+        <span class="muted small" id="batch-summary">0 rows · 0 units</span>
+        {% if not is_in %}
+        <label class="loan-toggle" for="on_loan"
+               title="Loan this batch out — scanned units are expected back from the custodian">
+          <input type="checkbox" id="on_loan" name="on_loan" value="1">
+          <span class="loan-switch" aria-hidden="true"></span>
+          <span class="loan-label">On loan</span>
+        </label>
+        <label class="loan-toggle condemn-toggle" for="condemned"
+               title="Write this batch off as condemned — later returns of these units will raise a warning">
+          <input type="checkbox" id="condemned" name="condemned" value="1">
+          <span class="loan-switch" aria-hidden="true"></span>
+          <span class="loan-label">Condemnation</span>
+        </label>
+        {% endif %}
+      </div>
+    </div>
+    <div id="hidden-inputs"></div>
+    <table class="table batch-table" id="batch-table">
+      <thead>
+        <tr><th>Item</th><th>Details</th><th class="num">Count</th><th></th></tr>
+      </thead>
+      <tbody id="batch-body"></tbody>
+    </table>
+    <p class="muted pad" id="batch-empty">Nothing scanned yet — scans will appear here until you press Finish.</p>
+
+    <div class="form-grid batch-fields">
+      {% if is_in %}
+      <div class="field">
+        <label for="site">Stock in to site</label>
+        <select class="input" id="site" name="site">
+          <option value="Site A" selected>Site A</option>
+          <option value="Site B">Site B</option>
+        </select>
+      </div>
+      {% endif %}
+      <div class="field{{ ' loan-req' if not is_in }}">
+        <label for="person">{{ 'Supplier / source' if is_in else 'Custodian' }}</label>
+        <input class="input" id="person" name="person" maxlength="80"
+               placeholder="{{ 'e.g. TechVendor Pte Ltd' if is_in else 'e.g. Alice Tan' }}">
+      </div>
+      {% if not is_in %}
+      <div class="field loan-req">
+        <label for="department">Department</label>
+        <input class="input" id="department" name="department" maxlength="80" list="dept-list"
+               placeholder="e.g. Finance">
+        <datalist id="dept-list">
+          <option value="Engineering">
+          <option value="Finance">
+          <option value="HR">
+          <option value="Marketing">
+          <option value="Operations">
+          <option value="Sales">
+        </datalist>
+      </div>
+      {% endif %}
+      <div class="field{{ ' loan-req' if not is_in }}">
+        <label for="reference">{{ 'PO / delivery order no.' if is_in else 'Ticket / request no.' }}</label>
+        <input class="input mono" id="reference" name="reference" maxlength="60"
+               placeholder="{{ 'PO-2026-…' if is_in else 'HD-…' }}">
+      </div>
+      <div class="field">
+        <label for="notes">Notes</label>
+        <input class="input" id="notes" name="notes" maxlength="500"
+               placeholder="{{ 'e.g. delivered to reception' if is_in else 'e.g. new joiner kit' }}">
+      </div>
+    </div>
+
+    <div class="form-actions">
+      <button type="button" class="btn btn-ghost" id="clear-btn">Clear list</button>
+      <button class="btn {{ 'btn-primary' if is_in else 'btn-warn' }}" id="finish-btn" type="submit" disabled>
+        Finish — record stock {{ 'in' if is_in else 'out' }}
+      </button>
+    </div>
+  </form>
+</div>
+
+<noscript>
+<div class="card form-card" style="margin-top:14px">
+  <div class="card-head"><h2>Record keyboard / mouse stock (JavaScript is off)</h2></div>
+  <form method="post" class="form-grid">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="rtype" value="bulk">
+    <input type="hidden" name="rserial" value="">
+    <input type="hidden" name="ream" value="">
+    <div class="field span-2">
+      <label for="ns-item">Item <span class="req">*</span></label>
+      <select class="input" id="ns-item" name="rref" required>
+        {% for sku in ["MS-WIRED", "MS-WIRELESS", "KB-WIRED", "KB-WIRELESS"] %}
+        {% set it = items_by_sku.get(sku) %}
+        <option value="{{ it["id"] if it else "" }}" {{ 'disabled' if not it or (not is_in and it["quantity"] == 0) }}>
+          {{ it["name"] if it else sku + " — not added yet (use Import)" }}{% if it %} — {{ it["quantity"] }} on hand{% endif %}
+        </option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="ns-qty">Quantity <span class="req">*</span></label>
+      <input class="input" type="number" id="ns-qty" name="rqty" min="1" step="1" value="1" required>
+    </div>
+    <div class="field">
+      <label for="ns-staff-id">Staff ID</label>
+      <input class="input mono" id="ns-staff-id" name="staff_id" maxlength="40">
+    </div>
+    {% if is_in %}
+    <div class="field">
+      <label for="ns-site">Stock in to site</label>
+      <select class="input" id="ns-site" name="site">
+        <option value="Site A" selected>Site A</option>
+        <option value="Site B">Site B</option>
+      </select>
+    </div>
+    {% endif %}
+    <div class="field">
+      <label for="ns-person">{{ 'Supplier / source' if is_in else 'Custodian' }}</label>
+      <input class="input" id="ns-person" name="person" maxlength="80">
+    </div>
+    {% if not is_in %}
+    <div class="field">
+      <label for="ns-department">Department</label>
+      <input class="input" id="ns-department" name="department" maxlength="80">
+    </div>
+    {% endif %}
+    <div class="field">
+      <label for="ns-reference">{{ 'PO / delivery order no.' if is_in else 'Ticket / request no.' }}</label>
+      <input class="input mono" id="ns-reference" name="reference" maxlength="60">
+    </div>
+    <div class="field span-2">
+      <label for="ns-notes">Notes</label>
+      <textarea class="input" id="ns-notes" name="notes" rows="2" maxlength="500"></textarea>
+    </div>
+    <div class="form-actions span-2">
+      <button class="btn {{ 'btn-primary' if is_in else 'btn-warn' }}" type="submit">
+        Record stock {{ 'in' if is_in else 'out' }}
+      </button>
+    </div>
+  </form>
+</div>
+</noscript>
+{% endif %}
+{% endblock %}
