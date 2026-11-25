@@ -20,16 +20,16 @@ from datetime import datetime
 from flask import current_app, g
 
 PRESET_CATEGORIES = [
-    "PC / Laptop",
-    "Monitor",
-    "Printer",
-    "Peripheral",
-    "Network",
-    "Cable",
-    "Storage",
-    "Accessory",
-    "Mobile",
-    "Other",
+#    "PC / Laptop",
+#    "Monitor",
+#    "Printer",
+#    "Peripheral",
+#    "Network",
+#    "Cable",
+#    "Storage",
+#    "Accessory",
+#    "Mobile",
+#    "Other",
 ]
 
 SCHEMA = """
