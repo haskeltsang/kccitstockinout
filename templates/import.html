@@ -69,9 +69,11 @@
 <div class="card form-card" id="excel-panel">
   <div class="card-head"><h2>Import tracked assets from Excel</h2></div>
   <p class="muted form-intro">
-    Upload your asset list and every row becomes one tracked unit in the storeroom —
-    no need to set up items first. Rows whose Asset/EAM no. or S/N is already
-    registered are skipped, so re-importing the same file is safe.
+    Upload your asset list — tagged units and Keyboard/Mouse quantities can share one file.
+    Re-importing is safe: matching S/N or EAM rows update the unit — fill missing
+    EAM/S/N, and refresh Funding / Project / Project Code when those cells have a
+    value. Existing codes are not overwritten; blank funding/project cells leave
+    the current values alone; unchanged rows are skipped.
   </p>
   <form method="post" enctype="multipart/form-data" class="form-grid">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
@@ -80,17 +82,18 @@
       <label for="file">Excel or CSV file <span class="req">*</span></label>
       <input class="input" id="file" name="file" type="file" accept=".xlsx,.csv" required>
       <p class="hint">
-        One row per unit, with a header row:
-        <strong>Item</strong>, <strong>Model</strong>, <strong>S/N</strong>, <strong>Asset/EAM No.</strong>.
-        <strong>Item</strong> is the category (e.g. Printer, PC, Laptop, Monitor) and
-        <strong>Model</strong> is the exact product — rows with the same Item + Model group
-        under one item. Model is required, and <strong>at least one of S/N or Asset/EAM No.</strong>
-        — new stock often has only an S/N; leave EAM blank until tagged.
-        <strong>Brand</strong>, <strong>Funding</strong>, <strong>Project</strong>,
-        <strong>Project Code</strong> and <strong>Site</strong> (Site A or Site B — blank
-        means Site B) columns are optional.
+        Header row columns:
+        <strong>Item</strong>, <strong>Model</strong>, <strong>S/N</strong>,
+        <strong>Asset/EAM No.</strong>, <strong>Quantity</strong>
+        (plus optional Brand, Funding, Project, Project Code, Site).
+        <strong>Item</strong> — pick <em>PC</em>, <em>Laptop</em>, <em>Monitor</em>,
+        <em>iPad</em>, or type your own; use <em>Keyboard</em> / <em>Mouse</em> for
+        untagged stock (add “Wireless” in Item or Model if needed).
+        <strong>Tagged items</strong> need Model and at least one of S/N or EAM —
+        leave <strong>Quantity</strong> blank (a quantity on these rows is rejected).
+        <strong>Keyboard / Mouse</strong> need only <strong>Quantity</strong>
+        (other unit fields are ignored). Site blank means Site B.
         Format code columns as <em>Text</em> in Excel so leading zeros are kept.
-        Keyboards and mice are not imported here — use the quantity form above.
       </p>
     </div>
     <div class="field span-2">
@@ -100,7 +103,7 @@
     </div>
     <div class="form-actions span-2">
       <a class="btn btn-ghost" href="{{ url_for('import_template_xlsx') }}">Download Excel template</a>
-      <a class="btn btn-ghost" href="{{ url_for('import_template_csv') }}">CSV template</a>
+      <!---a class="btn btn-ghost" href="{{ url_for('import_template_csv') }}">CSV template</a-->
       <button class="btn btn-primary" type="submit">Import</button>
     </div>
   </form>
@@ -112,6 +115,7 @@
     <h2>Import result</h2>
     <div>
       <span class="pill pill-in">{{ counts["imported"] }} imported</span>
+      {% if counts.get("updated") %}<span class="pill pill-in">{{ counts["updated"] }} updated</span>{% endif %}
       {% if counts["skipped"] %}<span class="pill pill-out">{{ counts["skipped"] }} skipped</span>{% endif %}
       {% if counts["errors"] %}<span class="pill pill-low">{{ counts["errors"] }} errors</span>{% endif %}
     </div>
@@ -125,6 +129,7 @@
         <th>Model</th>
         <th>S/N</th>
         <th>Asset/EAM No.</th>
+        <th class="num">Quantity</th>
         <th>Brand</th>
         <th>Funding</th>
         <th>Project</th>
@@ -142,6 +147,7 @@
         <td>{{ e["model"] or '—' }}</td>
         <td class="mono">{{ e["serial"] or '—' }}</td>
         <td class="mono">{{ e["eam"] or '—' }}</td>
+        <td class="num">{{ e["quantity"] or '—' }}</td>
         <td>{{ e["brand"] or '—' }}</td>
         <td>{{ e["funding"] or '—' }}</td>
         <td>{{ e["project"] or '—' }}</td>
@@ -149,6 +155,7 @@
         <td>{{ e["site"] or '—' }}</td>
         <td>
           {% if e["result"] == "imported" %}<span class="pill pill-in">Imported</span>
+          {% elif e["result"] == "updated" %}<span class="pill pill-in">Updated</span>
           {% elif e["result"] == "skipped" %}<span class="pill pill-out">Skipped</span>{% else %}<span class="pill pill-low">Error</span>{% endif %}
         </td>
         <td class="muted">{{ e["detail"] }}</td>

@@ -15,6 +15,12 @@
       <svg class="brand-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 9.2 12 6.7l4.5 2.5v5.3L12 17l-4.5-2.5z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M7.5 9.2 12 11.7l4.5-2.5M12 11.7V17" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
       <span>IT Stock Manager</span>
     </a>
+    <form class="nav-find" method="get" action="{{ url_for('find_asset') }}" role="search">
+      <label class="nav-find-label" for="nav-find-code">Quick find</label>
+      <input class="input nav-find-input" id="nav-find-code" name="code" type="search"
+             placeholder="Scan EAM / S/N…" autocomplete="off" maxlength="80"
+             value="{{ request.args.get('code', '') if request.endpoint == 'find_asset' else '' }}">
+    </form>
     <nav class="nav">
       <a class="nav-link {{ 'active' if request.endpoint == 'stock_in' }}" href="{{ url_for('stock_in') }}">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v8m0 0 3.5-3.5M12 12 8.5 8.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 15v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
@@ -35,6 +41,10 @@
       <a class="nav-link {{ 'active' if request.endpoint == 'import_stocks' }}" href="{{ url_for('import_stocks') }}">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V5m0 10 3.5-3.5M12 15l-3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 15v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
         <span>Import</span>
+      </a>
+      <a class="nav-link {{ 'active' if request.endpoint in ['packages', 'new_package', 'edit_package'] }}" href="{{ url_for('packages') }}">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7.5 12 4l8 3.5v9L12 20l-8-3.5z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M12 4v16M4 7.5l8 3.5 8-3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+        <span>Packages</span>
       </a>
       <a class="nav-link {{ 'active' if request.endpoint == 'history' }}" href="{{ url_for('history') }}">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 8v4l2.8 1.8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>

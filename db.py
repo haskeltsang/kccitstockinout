@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     site       TEXT NOT NULL DEFAULT '',
     on_loan    INTEGER NOT NULL DEFAULT 0,
     condemned  INTEGER NOT NULL DEFAULT 0,
+    follow_up  INTEGER NOT NULL DEFAULT 0,
     notes      TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
@@ -96,6 +97,25 @@ CREATE TABLE IF NOT EXISTS users (
     session_version INTEGER NOT NULL DEFAULT 1,
     created_at      TEXT NOT NULL
 );
+
+-- Stock-out kits (e.g. "OA PC" = 1 PC + 1 Monitor + wired KB/MS).
+CREATE TABLE IF NOT EXISTS packages (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    notes      TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS package_lines (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    package_id  INTEGER NOT NULL REFERENCES packages (id) ON DELETE CASCADE,
+    label       TEXT NOT NULL,
+    match_type  TEXT NOT NULL CHECK (match_type IN ('category', 'sku', 'item')),
+    match_value TEXT NOT NULL,
+    quantity    INTEGER NOT NULL DEFAULT 1 CHECK (quantity > 0),
+    sort_order  INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_package_lines_pkg ON package_lines (package_id);
 """
 
 
@@ -145,6 +165,10 @@ def _migrate(db):
     v10 adds condemnation: transactions.condemned marks a stock-out batch
     written off as condemned; units.condemned stays set on the unit so any
     later stock-in of that unit raises a warning.
+    v11 adds packages / package_lines for stock-out kit checklists
+    (e.g. OA PC = 1 PC + 1 Monitor + wired keyboard + mouse).
+    v12 adds transactions.follow_up for stock-out batches that need
+    a later chase (and triggers admin mail when custodian is blank).
     """
     version = db.execute("PRAGMA user_version").fetchone()[0]
     if version < 3:
@@ -207,4 +231,32 @@ def _migrate(db):
         db.execute(
             "ALTER TABLE units ADD COLUMN condemned INTEGER NOT NULL DEFAULT 0"
         )
-    db.execute("PRAGMA user_version = 10")
+    # v11 — packages may already exist from SCHEMA on a fresh DB; CREATE IF NOT
+    # EXISTS is enough to bring older files up without rewriting tables.
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS packages (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            notes      TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS package_lines (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            package_id  INTEGER NOT NULL REFERENCES packages (id) ON DELETE CASCADE,
+            label       TEXT NOT NULL,
+            match_type  TEXT NOT NULL CHECK (match_type IN ('category', 'sku', 'item')),
+            match_value TEXT NOT NULL,
+            quantity    INTEGER NOT NULL DEFAULT 1 CHECK (quantity > 0),
+            sort_order  INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_package_lines_pkg ON package_lines (package_id);
+        """
+    )
+    tx_cols = {r["name"] for r in db.execute("PRAGMA table_info(transactions)")}
+    if "follow_up" not in tx_cols:
+        db.execute(
+            "ALTER TABLE transactions ADD COLUMN follow_up INTEGER NOT NULL DEFAULT 0"
+        )
+    db.execute("PRAGMA user_version = 12")

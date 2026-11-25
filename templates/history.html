@@ -8,7 +8,7 @@
 <form class="toolbar" method="get" action="{{ url_for('history') }}">
   <div class="search">
     <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m15.5 15.5 4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-    <input class="input" type="search" name="q" value="{{ q }}" placeholder="Search item, person, staff ID, department, reference…">
+    <input class="input" type="search" name="q" value="{{ q }}" placeholder="Search EAM, S/N, item, person, staff ID, department, reference…">
   </div>
   <select class="input" name="type">
     <option value="" {{ 'selected' if not tx_type }}>All types</option>
@@ -26,7 +26,7 @@
   <table class="table">
     <thead>
       <tr>
-        <th>Date</th><th>Type</th><th>Item</th><th>EAM/Asset No.</th><th class="num">Qty</th>
+        <th>Date</th><th>Type</th><th>Item</th><th>Asset/EAM</th><th>S/N</th><th class="num">Qty</th>
         <th>Person</th><th>Department</th><th>Reference</th><th>Site</th><th>Staff ID</th><th>Notes</th>
       </tr>
     </thead>
@@ -34,9 +34,10 @@
       {% for t in rows %}
       <tr>
         <td class="nowrap">{{ t["created_at"] }}</td>
-        <td><span class="pill {{ 'pill-in' if t["type"] == 'IN' else 'pill-out' }}">{{ 'In' if t["type"] == 'IN' else 'Out' }}</span>{% if t["on_loan"] %}<span class="pill pill-loan">On loan</span>{% endif %}{% if t["condemned"] %}<span class="pill pill-condemn">Condemned</span>{% endif %}</td>
+        <td><span class="pill {{ 'pill-in' if t["type"] == 'IN' else 'pill-out' }}">{{ 'In' if t["type"] == 'IN' else 'Out' }}</span>{% if t["on_loan"] %}<span class="pill pill-loan">On loan</span>{% endif %}{% if t["condemned"] %}<span class="pill pill-condemn">Condemned</span>{% endif %}{% if t["follow_up"] %}<span class="pill pill-followup">Follow up</span>{% endif %}</td>
         <td><a class="item-name" href="{{ url_for('item_detail', item_id=t["item_id"]) }}">{{ t["item_name"] }}</a></td>
-        <td class="mono">{{ t["unit_eam"] or t["unit_serial"] or '—' }}</td>
+        <td class="mono">{{ t["unit_eam"] or '—' }}</td>
+        <td class="mono">{{ t["unit_serial"] or '—' }}</td>
         <td class="num"><span class="{{ 'qty-in' if t["type"] == 'IN' else 'qty-out' }}">{{ '+' if t["type"] == 'IN' else '−' }}{{ t["quantity"] }}</span></td>
         <td>{{ t["person"] or '—' }}</td>
         <td>{{ t["department"] or '—' }}</td>

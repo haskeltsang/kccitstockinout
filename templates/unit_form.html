@@ -57,6 +57,15 @@
       </select>
       <p class="hint">Which storeroom shelf this unit sits on.</p>
     </div>
+    {% if editing %}
+    {% set cur_stocked = form.get('stocked_in_at', stocked_in_at or '') %}
+    <div class="field">
+      <label for="stocked_in_at">Stocked-in date <span class="muted">(temporary)</span></label>
+      <input class="input mono" id="stocked_in_at" name="stocked_in_at" type="datetime-local"
+             value="{{ cur_stocked.replace(' ', 'T')[:16] if cur_stocked else '' }}">
+      <p class="hint">Temporary correction — updates this unit’s stock-in timestamp in history.</p>
+    </div>
+    {% endif %}
     <div class="field span-2">
       <label for="notes">Notes</label>
       <textarea class="input" id="notes" name="notes" rows="2" maxlength="500"

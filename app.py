@@ -12,14 +12,17 @@ Data is stored in a single stock.db file next to this script.
 import argparse
 import csv
 import io
+import logging
 import os
 import re
 import secrets
+import smtplib
 import sqlite3
 import sys
 import time
 import zipfile
 from datetime import datetime
+from email.message import EmailMessage
 
 from flask import (
     Flask,
@@ -61,6 +64,20 @@ app.config["MAX_CONTENT_LENGTH"] = 4 * 1024 * 1024  # Excel imports; reject over
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 app.config["SESSION_COOKIE_SECURE"] = os.environ.get("STOCK_COOKIE_SECURE", "").lower() \
     in ("1", "true", "yes")  # set when serving over HTTPS
+# SMTP — dummy placeholders for now; override with STOCK_SMTP_* / STOCK_ADMIN_EMAIL.
+app.config["SMTP_HOST"] = os.environ.get("STOCK_SMTP_HOST", "smtp.example.com")
+app.config["SMTP_PORT"] = int(os.environ.get("STOCK_SMTP_PORT", "587"))
+app.config["SMTP_USER"] = os.environ.get("STOCK_SMTP_USER", "stock-noreply@example.com")
+app.config["SMTP_PASSWORD"] = os.environ.get("STOCK_SMTP_PASSWORD", "change-me")
+app.config["SMTP_FROM"] = os.environ.get(
+    "STOCK_SMTP_FROM", os.environ.get("STOCK_SMTP_USER", "stock-noreply@example.com")
+)
+app.config["SMTP_USE_TLS"] = os.environ.get("STOCK_SMTP_TLS", "1").lower() in (
+    "1", "true", "yes",
+)
+app.config["ADMIN_EMAIL"] = os.environ.get("STOCK_ADMIN_EMAIL", "admin@example.com")
+
+log = logging.getLogger("stock")
 
 
 def _load_secret_key():
@@ -141,6 +158,92 @@ def now_str():
     return datetime.now().strftime("%Y-%m-%d %H:%M")
 
 
+def parse_stocked_in(raw):
+    """Parse a stocked-in date/time from a form. Returns 'YYYY-MM-DD HH:MM' or None."""
+    text = (raw or "").strip().replace("T", " ")
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(text, fmt)
+            if fmt == "%Y-%m-%d":
+                return dt.strftime("%Y-%m-%d 00:00")
+            return dt.strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            continue
+    return None
+
+
+def send_mail(subject, body, to_addrs=None):
+    """Send a plain-text email via the configured SMTP server.
+
+    Returns (ok, detail). Dummy host/credentials are fine for wiring —
+    failures are logged and returned so callers can flash a warning
+    without rolling back the stock movement.
+    """
+    recipients = to_addrs or [app.config["ADMIN_EMAIL"]]
+    recipients = [a for a in recipients if a]
+    if not recipients:
+        return False, "No admin email configured"
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = app.config["SMTP_FROM"]
+    msg["To"] = ", ".join(recipients)
+    msg.set_content(body)
+    host = app.config["SMTP_HOST"]
+    port = app.config["SMTP_PORT"]
+    try:
+        with smtplib.SMTP(host, port, timeout=15) as smtp:
+            if app.config["SMTP_USE_TLS"]:
+                smtp.starttls()
+            user = app.config["SMTP_USER"]
+            password = app.config["SMTP_PASSWORD"]
+            if user:
+                smtp.login(user, password)
+            smtp.send_message(msg)
+        return True, f"Sent to {', '.join(recipients)}"
+    except Exception as exc:  # noqa: BLE001 — surface any SMTP/network failure
+        log.warning("SMTP send failed (%s:%s): %s", host, port, exc)
+        return False, str(exc)
+
+
+def _stock_out_admin_alert(ops, dept, ref_no, staff_id, notes, follow_up, username):
+    """Email admin when a stock-out has no custodian."""
+    lines = [
+        "A stock-out was recorded without a custodian.",
+        "",
+        f"When:        {now_str()}",
+        f"Operator:    {username or '(unknown)'}",
+        f"Staff ID:    {staff_id or '(blank)'}",
+        f"Department:  {dept or '(blank)'}",
+        f"Ticket/ref:  {ref_no or '(blank)'}",
+        f"Follow up:   {'Yes' if follow_up else 'No'}",
+        f"Notes:       {notes or '(none)'}",
+        "",
+        "Items:",
+    ]
+    for op in ops:
+        if op["kind"] == "unit":
+            u = op["unit"]
+            code = u["eam_no"] or u["serial_no"] or f"unit #{u['id']}"
+            lines.append(f"  • {u['item_name']} ({code})")
+        elif op["kind"] == "bulk":
+            item = op.get("item")
+            name = item["name"] if item is not None else f"item #{op['ref']}"
+            lines.append(f"  • {name} × {op['qty']}")
+        else:
+            lines.append(f"  • {op.get('kind')} ref={op.get('ref')}")
+    lines.extend([
+        "",
+        "(This message was sent automatically by IT Stock Manager.",
+        "SMTP settings: STOCK_SMTP_HOST / STOCK_ADMIN_EMAIL.)",
+    ])
+    return send_mail(
+        subject="Stock out with no custodian — follow up needed",
+        body="\n".join(lines),
+    )
+
+
 def get_item_or_404(item_id):
     item = database.get_db().execute(
         "SELECT * FROM items WHERE id = ?", (item_id,)
@@ -164,9 +267,10 @@ def history_filters(args):
         like = f"%{q}%"
         clauses.append(
             "(i.name LIKE ? OR i.sku LIKE ? OR t.person LIKE ? OR t.staff_id LIKE ? "
-            "OR t.department LIKE ? OR t.reference LIKE ? OR t.site LIKE ?)"
+            "OR t.department LIKE ? OR t.reference LIKE ? OR t.site LIKE ? "
+            "OR u.eam_no LIKE ? OR u.serial_no LIKE ?)"
         )
-        params += [like] * 7
+        params += [like] * 9
     if date_from:
         clauses.append("t.created_at >= ?")
         params.append(date_from + " 00:00")
@@ -184,7 +288,7 @@ def history_filters(args):
 @app.before_request
 def csrf_protect():
     if request.method == "POST":
-        sent = request.form.get("_csrf", "")
+        sent = request.form.get("_csrf", "") or request.headers.get("X-CSRF-Token", "")
         if not sent or not secrets.compare_digest(sent, session.get("_csrf", "")):
             abort(400, description="Invalid form token. Reload the page and try again.")
 
@@ -539,6 +643,44 @@ def items():
     return render_template("items.html", items=rows, q=q, category=category, cats=cats)
 
 
+@app.route("/find")
+def find_asset():
+    """Quick-find from the nav: EAM / S/N → transaction history for that asset."""
+    code = request.args.get("code", "").strip()
+    if not code:
+        flash("Scan or type an EAM or S/N to find an asset.", "error")
+        return redirect(request.referrer or url_for("dashboard"))
+    conn = database.get_db()
+    unit = conn.execute(
+        """SELECT u.id, u.item_id, u.eam_no, u.serial_no, i.name AS item_name
+           FROM units u
+           JOIN items i ON i.id = u.item_id
+           WHERE (u.eam_no <> '' AND u.eam_no = ? COLLATE NOCASE)
+              OR (u.serial_no <> '' AND u.serial_no = ? COLLATE NOCASE)
+           LIMIT 1""",
+        (code, code),
+    ).fetchone()
+    if unit is not None:
+        # Prefer the canonical stored code so history search hits cleanly.
+        lookup = unit["eam_no"] if unit["eam_no"] and unit["eam_no"].lower() == code.lower() \
+            else (unit["serial_no"] or unit["eam_no"] or code)
+        flash(
+            f"Showing history for “{unit['item_name']}” "
+            f"({unit['eam_no'] or '—'} / {unit['serial_no'] or '—'}).",
+            "success",
+        )
+        return redirect(url_for("history", q=lookup))
+    item = conn.execute(
+        "SELECT id, name, sku FROM items WHERE sku = ? COLLATE NOCASE LIMIT 1",
+        (code,),
+    ).fetchone()
+    if item is not None:
+        flash(f"Showing history for “{item['name']}” (SKU {item['sku']}).", "success")
+        return redirect(url_for("history", q=item["sku"] or code))
+    flash(f"No asset found for “{code}”.", "error")
+    return redirect(request.referrer or url_for("history"))
+
+
 @app.route("/items/<int:item_id>")
 def item_detail(item_id):
     conn = database.get_db()
@@ -556,9 +698,12 @@ def item_detail(item_id):
                   (SELECT t.person FROM transactions t
                    WHERE t.unit_id = u.id AND t.type = 'OUT'
                    ORDER BY t.created_at DESC, t.id DESC LIMIT 1) AS holder,
-                  (SELECT t.created_at FROM transactions t
-                   WHERE t.unit_id = u.id AND t.type = 'IN'
-                   ORDER BY t.created_at DESC, t.id DESC LIMIT 1) AS stocked_in_at
+                  COALESCE(
+                    (SELECT t.created_at FROM transactions t
+                     WHERE t.unit_id = u.id AND t.type = 'IN'
+                     ORDER BY t.created_at DESC, t.id DESC LIMIT 1),
+                    u.created_at
+                  ) AS stocked_in_at
            FROM units u WHERE u.item_id = ?
            ORDER BY u.status DESC, u.eam_no, u.serial_no""",
         (item_id,),
@@ -571,8 +716,17 @@ def item_detail(item_id):
            ORDER BY t.created_at DESC, t.id DESC LIMIT 50""",
         (item_id,),
     ).fetchall()
+    highlight_unit_id = form_int(request.args.get("unit"), default=0) or None
+    if highlight_unit_id is not None:
+        if not any(u["id"] == highlight_unit_id for u in units):
+            highlight_unit_id = None
     return render_template(
-        "item_detail.html", item=item, counts=counts, units=units, history=history
+        "item_detail.html",
+        item=item,
+        counts=counts,
+        units=units,
+        history=history,
+        highlight_unit_id=highlight_unit_id,
     )
 
 
@@ -624,7 +778,26 @@ IMPORT_ALIASES = {
     "project": {"project", "project name"},
     "project_code": {"project code", "project no", "project number", "proj code"},
     "site": {"site", "site name", "storeroom"},
+    "quantity": {"quantity", "qty", "qty.", "amount", "count", "quality"},
 }
+
+# Suggested Item values in the Excel template (users may also type their own).
+IMPORT_ITEM_CHOICES = (
+    "OA PC",
+    "Ultra Slim PC",
+    "iMac",
+    "Laptop",
+    "Monitor",
+    "iPad",
+    "Keyboard (Wired)",
+    "Keyboard (Wireless)",
+    "Mouse (Wired)",
+    "Mouse (Wireless)",
+    "LAN Cable",
+)
+
+# Stock In “new product” category list (order kept in the dropdown).
+STOCK_IN_CATEGORY_CHOICES = IMPORT_ITEM_CHOICES
 
 # The two storerooms stock can be received into. Forms offer exactly these;
 # the import maps "A"/"Site A" etc. onto them (blank in a file -> Site B).
@@ -638,10 +811,11 @@ def site_for(raw):
 
 
 IMPORT_TEMPLATE_HEADERS = [
-    "Item", "Model", "S/N", "Asset/EAM No.", "Brand", "Funding", "Project", "Project Code", "Site",
+    "Item", "Model", "S/N", "Asset/EAM No.", "Quantity",
+    "Brand", "Funding", "Project", "Project Code", "Site",
 ]
+# Example rows shipped in the Excel/CSV template (delete or replace when importing).
 IMPORT_TEMPLATE_SAMPLE = [
-
 ]
 IMPORT_MAX_ROWS = 5000
 # An .xlsx is a zip: a small upload can expand enormously (zip bomb). Cap the
@@ -678,13 +852,15 @@ CATEGORY_ALIASES = {c.lower(): c for c in PRESET_CATEGORIES}
 CATEGORY_ALIASES.update({
     "pc": "PC", "laptop": "Laptop", "notebook": "Laptop",
     "desktop": "PC", "computer": "PC",
-    "screen": "Monitor", "display": "Monitor",
-    "headset": "Peripheral", "keyboard": "Peripheral", "mouse": "Peripheral",
-    "webcam": "Peripheral",
+    "screen": "Monitor", "display": "Monitor", "monitor": "Monitor",
+    "ipad": "iPad", "i-pad": "iPad",
+    "headset": "Peripheral", "webcam": "Peripheral",
     "router": "Network", "switch": "Network", "access point": "Network",
     "ssd": "Storage", "hdd": "Storage", "hard drive": "Storage", "usb drive": "Storage",
     "hub": "Accessory", "dock": "Accessory", "docking station": "Accessory",
     "phone": "Mobile", "tablet": "Mobile",
+    "lan cable": "LAN Cable", "lan": "LAN Cable", "network cable": "LAN Cable",
+    "cat5": "LAN Cable", "cat6": "LAN Cable", "ethernet cable": "LAN Cable",
 })
 
 
@@ -692,6 +868,38 @@ def _category_for(raw):
     if not raw:
         return "Other"
     return CATEGORY_ALIASES.get(raw.strip().lower(), raw.strip())
+
+
+def _accessory_from_item(item_raw, model_raw=""):
+    """If Item is a keyboard/mouse row, return (kind, connection); else None.
+
+    Connection defaults to wired; mention wireless in Item or Model to pick
+    the wireless SKU (e.g. Item=Mouse, Model=Wireless).
+    """
+    item = (item_raw or "").strip()
+    if not item or not _ACCESSORY_WORD.search(item):
+        return None
+    kind = "keyboard" if re.search(r"keyboards?", item, re.I) else "mouse"
+    blob = f"{item} {model_raw or ''}".lower()
+    connection = "wireless" if re.search(r"wireless", blob) else "wired"
+    if (kind, connection) not in ACCESSORY_ITEMS:
+        return None
+    return kind, connection
+
+
+def _parse_import_qty(raw):
+    """Return int quantity, 0 if blank, or None if the cell is not a whole number."""
+    text = (raw or "").strip()
+    if not text:
+        return 0
+    try:
+        # Excel may yield "5.0"
+        num = float(text)
+    except ValueError:
+        return None
+    if not num.is_integer() or num < 0:
+        return None
+    return int(num)
 
 
 class ImportFileError(Exception):
@@ -709,8 +917,138 @@ ACCESSORY_ITEMS = {
     ("keyboard", "wireless"): ("Keyboard (Wireless)", "KB-WIRELESS"),
 }
 ACCESSORY_SKUS = {sku for _name, sku in ACCESSORY_ITEMS.values()}
+# Stock-in category labels → the same (kind, connection) keys as ACCESSORY_ITEMS.
+ACCESSORY_CATEGORY_ALIASES = {
+    "keyboard (wired)": ("keyboard", "wired"),
+    "keyboard - wired": ("keyboard", "wired"),
+    "keyboard — wired": ("keyboard", "wired"),
+    "kb wired": ("keyboard", "wired"),
+    "keyboard (wireless)": ("keyboard", "wireless"),
+    "keyboard - wireless": ("keyboard", "wireless"),
+    "keyboard — wireless": ("keyboard", "wireless"),
+    "kb wireless": ("keyboard", "wireless"),
+    "mouse (wired)": ("mouse", "wired"),
+    "mouse - wired": ("mouse", "wired"),
+    "mouse — wired": ("mouse", "wired"),
+    "ms wired": ("mouse", "wired"),
+    "mouse (wireless)": ("mouse", "wireless"),
+    "mouse - wireless": ("mouse", "wireless"),
+    "mouse — wireless": ("mouse", "wireless"),
+    "ms wireless": ("mouse", "wireless"),
+}
 _ACCESSORY_WORD = re.compile(r"\b(keyboards?|mouse|mice)\b", re.IGNORECASE)
 ACCESSORY_MAX_QTY = 10000
+
+
+def _accessory_kind_from_category(category):
+    """Return (kind, connection) when category is a KB/MS wired/wireless choice."""
+    key = re.sub(r"\s+", " ", (category or "").strip().lower())
+    return ACCESSORY_CATEGORY_ALIASES.get(key)
+
+
+def _ensure_accessory_item(conn, kind, connection, brand="", now=None):
+    """Find or create the fixed SKU item for a keyboard/mouse variant."""
+    if (kind, connection) not in ACCESSORY_ITEMS:
+        raise ValueError("Unknown keyboard/mouse type.")
+    name, sku = ACCESSORY_ITEMS[(kind, connection)]
+    now = now or now_str()
+    brand = (brand or "").strip()
+    item = conn.execute(
+        "SELECT * FROM items WHERE sku = ? COLLATE NOCASE", (sku,)
+    ).fetchone()
+    if item is None:
+        item = conn.execute(
+            "SELECT * FROM items WHERE category = ? COLLATE NOCASE AND name = ? COLLATE NOCASE",
+            (ACCESSORY_CATEGORY, name),
+        ).fetchone()
+    if item is None:
+        cur = conn.execute(
+            """INSERT INTO items
+               (name, sku, category, brand, model, quantity, min_quantity,
+                location, notes, created_at, updated_at)
+               VALUES (?,?,?,?,?,0,0,?,?,?,?)""",
+            (name, sku, ACCESSORY_CATEGORY, brand, name, "", "", now, now),
+        )
+        return {
+            "id": cur.lastrowid,
+            "name": name,
+            "sku": sku,
+            "category": ACCESSORY_CATEGORY,
+            "brand": brand,
+            "model": name,
+            "quantity": 0,
+            "created": True,
+        }
+    item_id = item["id"]
+    if not item["sku"]:
+        conn.execute(
+            "UPDATE items SET sku = ?, updated_at = ? WHERE id = ?",
+            (sku, now, item_id),
+        )
+    if brand and not (item["brand"] or "").strip():
+        conn.execute(
+            "UPDATE items SET brand = ?, updated_at = ? WHERE id = ?",
+            (brand, now, item_id),
+        )
+        item = dict(item)
+        item["brand"] = brand
+    return {
+        "id": item_id,
+        "name": item["name"],
+        "sku": item["sku"] or sku,
+        "category": item["category"] or ACCESSORY_CATEGORY,
+        "brand": item["brand"] or brand,
+        "model": item["model"] or name,
+        "quantity": item["quantity"],
+        "created": False,
+    }
+
+
+def _add_accessory_stock(conn, kind, connection, qty, *, reference="", site="Site B",
+                         notes="", now=None):
+    """Create/top-up a keyboard or mouse item by quantity. Returns (name, sku)."""
+    if (kind, connection) not in ACCESSORY_ITEMS:
+        raise ValueError("Unknown keyboard/mouse type.")
+    if qty < 1 or qty > ACCESSORY_MAX_QTY:
+        raise ValueError(f"Quantity must be between 1 and {ACCESSORY_MAX_QTY}.")
+    name, sku = ACCESSORY_ITEMS[(kind, connection)]
+    now = now or now_str()
+    item = conn.execute(
+        "SELECT * FROM items WHERE sku = ? COLLATE NOCASE", (sku,)
+    ).fetchone()
+    if item is None:
+        item = conn.execute(
+            "SELECT * FROM items WHERE category = ? COLLATE NOCASE AND name = ? COLLATE NOCASE",
+            (ACCESSORY_CATEGORY, name),
+        ).fetchone()
+    if item is None:
+        cur = conn.execute(
+            """INSERT INTO items
+               (name, sku, category, brand, model, quantity, min_quantity,
+                location, notes, created_at, updated_at)
+               VALUES (?,?,?,?,?,0,0,?,?,?,?)""",
+            (name, sku, ACCESSORY_CATEGORY, "", name, "", "", now, now),
+        )
+        item_id = cur.lastrowid
+    else:
+        item_id = item["id"]
+        if not item["sku"]:
+            conn.execute(
+                "UPDATE items SET sku = ?, updated_at = ? WHERE id = ?",
+                (sku, now, item_id),
+            )
+    conn.execute(
+        "UPDATE items SET quantity = quantity + ?, updated_at = ? WHERE id = ?",
+        (qty, now, item_id),
+    )
+    conn.execute(
+        """INSERT INTO transactions
+           (item_id, unit_id, type, quantity, person, department, reference, site, notes, created_at)
+           VALUES (?,NULL,'IN',?,?,'',?,?,?,?)""",
+        (item_id, qty, "", reference, site,
+         notes or "Quantity added on the Import page", now),
+    )
+    return name, sku
 
 
 def _record_accessory_add(conn, form):
@@ -727,46 +1065,12 @@ def _record_accessory_add(conn, form):
     reference = form.get("reference", "").strip()
     site = site_for(form.get("site")) or "Site B"
     notes = form.get("notes", "").strip()
-    name, sku = ACCESSORY_ITEMS[(kind, connection)]
-    now = now_str()
-    item = conn.execute(
-        "SELECT * FROM items WHERE sku = ? COLLATE NOCASE", (sku,)
-    ).fetchone()
-    if item is None:
-        item = conn.execute(
-            "SELECT * FROM items WHERE category = ? COLLATE NOCASE AND name = ? COLLATE NOCASE",
-            (ACCESSORY_CATEGORY, name),
-        ).fetchone()
     try:
-        if item is None:
-            cur = conn.execute(
-                """INSERT INTO items
-                   (name, sku, category, brand, model, quantity, min_quantity,
-                    location, notes, created_at, updated_at)
-                   VALUES (?,?,?,?,?,0,0,?,?,?,?)""",
-                (name, sku, ACCESSORY_CATEGORY, "", name, "", "", now, now),
-            )
-            item_id = cur.lastrowid
-        else:
-            item_id = item["id"]
-            # Make sure the item carries its scan SKU (older rows may predate it).
-            if not item["sku"]:
-                conn.execute(
-                    "UPDATE items SET sku = ?, updated_at = ? WHERE id = ?",
-                    (sku, now, item_id),
-                )
-        conn.execute(
-            "UPDATE items SET quantity = quantity + ?, updated_at = ? WHERE id = ?",
-            (qty, now, item_id),
-        )
-        conn.execute(
-            """INSERT INTO transactions
-               (item_id, unit_id, type, quantity, person, department, reference, site, notes, created_at)
-               VALUES (?,NULL,'IN',?,?,'',?,?,?,?)""",
-            (item_id, qty, "", reference, site, notes or "Quantity added on the Import page", now),
+        name, sku = _add_accessory_stock(
+            conn, kind, connection, qty, reference=reference, site=site, notes=notes,
         )
         conn.commit()
-    except sqlite3.Error:
+    except (sqlite3.Error, ValueError):
         conn.rollback()
         flash("Could not save the quantity. Please try again.", "error")
         return redirect(url_for("import_stocks"))
@@ -813,11 +1117,13 @@ def _map_import_rows(rows, limit=IMPORT_MAX_ROWS):
                     if h in aliases and field not in mapping.values():
                         mapping[idx] = field
             fields = set(mapping.values())
-            if "item" not in fields or not ({"eam", "serial"} & fields):
+            # Item is always required. Unit rows need S/N or EAM; Keyboard/Mouse
+            # rows need Quantity — a file may mix both, so accept either column set.
+            if "item" not in fields or not ({"eam", "serial", "quantity"} & fields):
                 raise ImportFileError(
                     "Could not find the required columns. The first row must be a header "
-                    "such as “Item, Model, Asset/EAM No., S/N” — one code column "
-                    "(Asset/EAM No. or S/N) is enough."
+                    "with Item, plus S/N and/or Asset/EAM No. for tagged units, and/or "
+                    "Quantity for Keyboard/Mouse rows."
                 )
             header = mapping
             continue
@@ -829,6 +1135,7 @@ def _map_import_rows(rows, limit=IMPORT_MAX_ROWS):
             "model": values.get("model", ""),
             "eam": values.get("eam", ""),
             "serial": values.get("serial", ""),
+            "quantity": values.get("quantity", ""),
             "brand": values.get("brand", ""),
             "funding": values.get("funding", ""),
             "project": values.get("project", ""),
@@ -954,18 +1261,49 @@ def import_stocks():
         try:
             for row_no, row in parsed:
                 entry = {"row": row_no, **row}
-                category, model, eam, serial = (
-                    _category_for(row["item"]), row["model"], row["eam"], row["serial"],
-                )
+                model, eam, serial = row["model"], row["eam"], row["serial"]
                 site = site_for(row["site"])
-                if not model:
-                    entry.update(result="error", detail="Missing model")
-                elif _ACCESSORY_WORD.search(row["item"] or "") or _ACCESSORY_WORD.search(model):
+                qty = _parse_import_qty(row.get("quantity", ""))
+                accessory = _accessory_from_item(row["item"], model)
+
+                if qty is None:
+                    entry.update(result="error", detail="Quantity must be a whole number")
+                elif accessory:
+                    # Keyboard / Mouse — quantity only (other unit fields ignored).
+                    if qty < 1:
+                        entry.update(
+                            result="error",
+                            detail="Keyboard/Mouse rows need a Quantity of at least 1",
+                        )
+                    elif qty > ACCESSORY_MAX_QTY:
+                        entry.update(
+                            result="error",
+                            detail=f"Quantity cannot exceed {ACCESSORY_MAX_QTY}",
+                        )
+                    elif row["site"].strip() and not site:
+                        entry.update(
+                            result="error",
+                            detail=f"Unknown site “{row['site'].strip()}” — use Site A or Site B",
+                        )
+                    else:
+                        kind, connection = accessory
+                        site = site or "Site B"
+                        name, sku = _add_accessory_stock(
+                            conn, kind, connection, qty,
+                            reference=reference, site=site, notes="Excel import", now=now,
+                        )
+                        entry.update(
+                            result="imported",
+                            detail=f"Added {qty} × {name} ({sku})",
+                        )
+                elif qty > 0:
                     entry.update(
                         result="error",
-                        detail="Keyboards and mice have no asset tags — add them "
-                               "by quantity on the Import page",
+                        detail="Quantity is only for Keyboard/Mouse rows — leave it blank "
+                               "for PC, Laptop, Monitor, iPad and other tagged items",
                     )
+                elif not model:
+                    entry.update(result="error", detail="Missing model")
                 elif not eam and not serial:
                     entry.update(
                         result="error",
@@ -980,30 +1318,48 @@ def import_stocks():
                     dup = next(c for c in (eam, serial) if c and c.lower() in seen_codes)
                     entry.update(result="skipped",
                                  detail=f"“{dup}” already appears on row {seen_codes[dup.lower()]}")
-                elif code_clash(conn, serial, eam):
-                    entry.update(result="skipped", detail="Asset/EAM no. or S/N already registered")
                 else:
-                    site = site or "Site B"
-                    item_id, created = item_id_for(category, model, row["brand"])
-                    cur = conn.execute(
-                        """INSERT INTO units
-                           (item_id, serial_no, eam_no, status, site, funding, project, project_code,
-                            created_at, updated_at)
-                           VALUES (?,?,?,'in_stock',?,?,?,?,?,?)""",
-                        (item_id, serial, eam, site, row["funding"], row["project"],
-                         row["project_code"], now, now),
-                    )
-                    conn.execute(
-                        """INSERT INTO transactions
-                           (item_id, unit_id, type, quantity, person, department, reference, site, notes, created_at)
-                           VALUES (?,?,'IN',1,'','',?,?,'Excel import',?)""",
-                        (item_id, cur.lastrowid, reference, site, now),
-                    )
-                    for c in (eam, serial):
-                        if c:
-                            seen_codes[c.lower()] = row_no
-                    entry.update(result="imported",
-                                 detail="New item created" if created else "Added to existing item")
+                    existing, resolve_err = _resolve_import_unit(conn, serial, eam)
+                    if resolve_err:
+                        entry.update(result="error", detail=resolve_err)
+                    elif existing is not None:
+                        # Only apply site when the file actually named one —
+                        # blank site on a re-import must not force Site B.
+                        result, detail = _apply_import_unit_update(
+                            conn, existing, serial, eam, site,
+                            row["funding"], row["project"], row["project_code"],
+                            row["brand"], now,
+                        )
+                        entry.update(result=result, detail=detail)
+                        if result == "updated":
+                            for c in (eam, serial):
+                                if c:
+                                    seen_codes[c.lower()] = row_no
+                    else:
+                        site = site or "Site B"
+                        category = _category_for(row["item"])
+                        item_id, created = item_id_for(category, model, row["brand"])
+                        cur = conn.execute(
+                            """INSERT INTO units
+                               (item_id, serial_no, eam_no, status, site, funding, project, project_code,
+                                created_at, updated_at)
+                               VALUES (?,?,?,'in_stock',?,?,?,?,?,?)""",
+                            (item_id, serial, eam, site, row["funding"], row["project"],
+                             row["project_code"], now, now),
+                        )
+                        conn.execute(
+                            """INSERT INTO transactions
+                               (item_id, unit_id, type, quantity, person, department, reference, site, notes, created_at)
+                               VALUES (?,?,'IN',1,'','',?,?,'Excel import',?)""",
+                            (item_id, cur.lastrowid, reference, site, now),
+                        )
+                        for c in (eam, serial):
+                            if c:
+                                seen_codes[c.lower()] = row_no
+                        entry.update(
+                            result="imported",
+                            detail="New item created" if created else "Added to existing item",
+                        )
                 report.append(entry)
             conn.commit()
         except sqlite3.Error:
@@ -1013,12 +1369,19 @@ def import_stocks():
 
         counts = {
             "imported": sum(1 for e in report if e["result"] == "imported"),
+            "updated": sum(1 for e in report if e["result"] == "updated"),
             "skipped": sum(1 for e in report if e["result"] == "skipped"),
             "errors": sum(1 for e in report if e["result"] == "error"),
         }
+        parts = []
         if counts["imported"]:
-            flash(f"Imported {counts['imported']} unit{'s' if counts['imported'] != 1 else ''}.",
-                  "success")
+            n = counts["imported"]
+            parts.append(f"Imported {n} unit{'s' if n != 1 else ''}")
+        if counts["updated"]:
+            n = counts["updated"]
+            parts.append(f"updated {n}")
+        if parts:
+            flash(f"{'; '.join(parts)}.", "success")
         return render_template("import.html", report=report, counts=counts)
     return render_template("import.html", report=None)
 
@@ -1027,6 +1390,10 @@ def import_stocks():
 def import_template_xlsx():
     try:
         from openpyxl import Workbook
+        from openpyxl.comments import Comment
+        from openpyxl.styles import Font, PatternFill
+        from openpyxl.utils import get_column_letter
+        from openpyxl.worksheet.datavalidation import DataValidation
     except ImportError:
         abort(500, description="Excel support is missing — run: pip install -r requirements.txt")
     wb = Workbook()
@@ -1035,14 +1402,54 @@ def import_template_xlsx():
     ws.append(IMPORT_TEMPLATE_HEADERS)
     for row in IMPORT_TEMPLATE_SAMPLE:
         ws.append(row)
-    for col, width in zip("ABCDEFGHI", (26, 18, 16, 20, 14, 20, 16, 14, 10)):
-        ws.column_dimensions[col].width = width
+
+    # Hidden Lists sheet — Excel dropdowns are more reliable when they
+    # reference cells instead of an inline comma list.
+    lists = wb.create_sheet("Lists")
+    for i, name in enumerate(IMPORT_ITEM_CHOICES, start=1):
+        lists.cell(row=i, column=1, value=name)
+    lists.sheet_state = "hidden"
+
+    dv = DataValidation(
+        type="list",
+        formula1=f"=Lists!$A$1:$A${len(IMPORT_ITEM_CHOICES)}",
+        allow_blank=True,
+        showErrorMessage=False,  # custom Item text is allowed
+        showDropDown=False,      # openpyxl: False = show the arrow in Excel
+    )
+    dv.prompt = "Choose PC, Laptop, Monitor, iPad, Keyboard or Mouse — or type your own"
+    dv.promptTitle = "Item"
+    ws.add_data_validation(dv)
+    dv.add("A2:A5000")
+
+    header_fill = PatternFill("solid", fgColor="EEF2FF")
+    header_font = Font(bold=True)
+    for col_idx, title in enumerate(IMPORT_TEMPLATE_HEADERS, start=1):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.fill = header_fill
+        cell.font = header_font
+    ws["A1"].comment = Comment(
+        "Dropdown: PC, Laptop, Monitor, iPad, Keyboard, Mouse — or type any other item name.",
+        "IT Stock Manager",
+    )
+    ws["E1"].comment = Comment(
+        "For Keyboard/Mouse rows only. Leave blank for PC, Laptop, Monitor, iPad and other tagged units.",
+        "IT Stock Manager",
+    )
+    widths = (14, 18, 16, 16, 10, 14, 16, 16, 14, 10)
+    for col_idx, width in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
+    ws.freeze_panes = "A2"
+
     buf = io.BytesIO()
     wb.save(buf)
     return Response(
         buf.getvalue(),
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=stock-import-template.xlsx"},
+        headers={
+            "Content-Disposition": "attachment; filename=stock-import-template.xlsx",
+            "Cache-Control": "no-store",
+        },
     )
 
 
@@ -1055,7 +1462,10 @@ def import_template_csv():
     return Response(
         out.getvalue(),
         mimetype="text/csv; charset=utf-8",
-        headers={"Content-Disposition": "attachment; filename=stock-import-template.csv"},
+        headers={
+            "Content-Disposition": "attachment; filename=stock-import-template.csv",
+            "Cache-Control": "no-store",
+        },
     )
 
 
@@ -1090,6 +1500,129 @@ def code_clash(conn, serial, eam, exclude_unit_id=None):
         params.append(exclude_unit_id)
     sql += " LIMIT 1"
     return conn.execute(sql, params).fetchone()
+
+
+def _unit_by_serial(conn, serial):
+    if not serial:
+        return None
+    return conn.execute(
+        "SELECT * FROM units WHERE serial_no <> '' AND serial_no = ? COLLATE NOCASE",
+        (serial,),
+    ).fetchone()
+
+
+def _unit_by_eam(conn, eam):
+    if not eam:
+        return None
+    return conn.execute(
+        "SELECT * FROM units WHERE eam_no <> '' AND eam_no = ? COLLATE NOCASE",
+        (eam,),
+    ).fetchone()
+
+
+def _resolve_import_unit(conn, serial, eam):
+    """Match an import row to an existing unit by S/N and/or EAM.
+
+    Returns (unit_or_None, error_detail_or_None). A conflict (S/N and EAM
+    belonging to two different units) yields an error string.
+    """
+    by_serial = _unit_by_serial(conn, serial)
+    by_eam = _unit_by_eam(conn, eam)
+    if by_serial is not None and by_eam is not None and by_serial["id"] != by_eam["id"]:
+        return None, (
+            f"S/N matches unit #{by_serial['id']} but Asset/EAM matches "
+            f"unit #{by_eam['id']} — fix the file before re-importing"
+        )
+    return by_serial or by_eam, None
+
+
+def _fill_blank(current, incoming):
+    """Keep an existing non-empty value; otherwise take the import value."""
+    return current if (current or "").strip() else (incoming or "")
+
+
+def _apply_provided(current, incoming):
+    """Use the import value when the cell is non-empty; otherwise keep current."""
+    incoming = (incoming or "").strip()
+    return incoming if incoming else (current or "")
+
+
+def _apply_import_unit_update(conn, unit, serial, eam, site, funding, project,
+                              project_code, brand, now):
+    """Update a matched unit from an import row.
+
+    S/N and EAM only fill blanks (never overwrite an existing code).
+    Funding, project and project code are replaced whenever the file
+    provides a value. Site and brand still fill blanks only. Returns
+    (result, detail) where result is 'updated', 'skipped' or 'error'.
+    """
+    changes = []
+    new_serial = unit["serial_no"] or ""
+    new_eam = unit["eam_no"] or ""
+
+    if serial:
+        if not new_serial:
+            # Ensure the incoming S/N is not already on another unit.
+            clash = _unit_by_serial(conn, serial)
+            if clash is not None and clash["id"] != unit["id"]:
+                return "error", f"S/N “{serial}” is already on another unit"
+            new_serial = serial
+            changes.append(f"S/N set to {serial}")
+        elif new_serial.lower() != serial.lower():
+            return "error", (
+                f"This unit already has S/N “{new_serial}” — "
+                f"cannot change it to “{serial}” via import"
+            )
+
+    if eam:
+        if not new_eam:
+            clash = _unit_by_eam(conn, eam)
+            if clash is not None and clash["id"] != unit["id"]:
+                return "error", f"Asset/EAM “{eam}” is already on another unit"
+            new_eam = eam
+            changes.append(f"EAM set to {eam}")
+        elif new_eam.lower() != eam.lower():
+            return "error", (
+                f"This unit already has EAM “{new_eam}” — "
+                f"cannot change it to “{eam}” via import"
+            )
+
+    new_site = _fill_blank(unit["site"], site)
+    new_funding = _apply_provided(unit["funding"], funding)
+    new_project = _apply_provided(unit["project"], project)
+    new_project_code = _apply_provided(unit["project_code"], project_code)
+
+    if new_site != (unit["site"] or "") and site:
+        changes.append(f"site set to {new_site}")
+    if (funding or "").strip() and new_funding != (unit["funding"] or ""):
+        changes.append(f"funding → {new_funding}")
+    if (project or "").strip() and new_project != (unit["project"] or ""):
+        changes.append(f"project → {new_project}")
+    if (project_code or "").strip() and new_project_code != (unit["project_code"] or ""):
+        changes.append(f"project code → {new_project_code}")
+
+    # Fill blank brand on the parent item (never overwrite).
+    if brand:
+        item = conn.execute(
+            "SELECT id, brand FROM items WHERE id = ?", (unit["item_id"],)
+        ).fetchone()
+        if item is not None and not (item["brand"] or "").strip():
+            conn.execute(
+                "UPDATE items SET brand = ?, updated_at = ? WHERE id = ?",
+                (brand, now, item["id"]),
+            )
+            changes.append("brand filled in")
+
+    if not changes:
+        return "skipped", "Already registered — nothing new to update"
+
+    conn.execute(
+        """UPDATE units SET serial_no = ?, eam_no = ?, site = ?, funding = ?,
+           project = ?, project_code = ?, updated_at = ? WHERE id = ?""",
+        (new_serial, new_eam, new_site, new_funding, new_project,
+         new_project_code, now, unit["id"]),
+    )
+    return "updated", "; ".join(changes)
 
 
 @app.route("/items/<int:item_id>/units/new", methods=["GET", "POST"])
@@ -1136,10 +1669,23 @@ def new_unit(item_id):
     return render_template("unit_form.html", item=item, unit=None, form={})
 
 
+def _unit_stocked_in_at(conn, unit_id, fallback=""):
+    row = conn.execute(
+        """SELECT created_at FROM transactions
+           WHERE unit_id = ? AND type = 'IN'
+           ORDER BY created_at DESC, id DESC LIMIT 1""",
+        (unit_id,),
+    ).fetchone()
+    if row is not None:
+        return row["created_at"]
+    return fallback or ""
+
+
 @app.route("/units/<int:unit_id>/edit", methods=["GET", "POST"])
 def edit_unit(unit_id):
     unit = get_unit_or_404(unit_id)
     conn = database.get_db()
+    stocked_in_at = _unit_stocked_in_at(conn, unit_id, unit["created_at"])
     if request.method == "POST":
         form = request.form
         serial = form.get("serial_no", "").strip()
@@ -1149,21 +1695,54 @@ def edit_unit(unit_id):
         project = form.get("project", "").strip()
         project_code = form.get("project_code", "").strip()
         notes = form.get("notes", "").strip()
+        stocked_in = parse_stocked_in(form.get("stocked_in_at"))
         if not serial and not eam:
             flash("Give the unit at least an S/N or an EAM number.", "error")
-            return render_template("unit_form.html", item=None, unit=unit, form=form), 400
+            return render_template(
+                "unit_form.html", item=None, unit=unit, form=form,
+                stocked_in_at=stocked_in_at,
+            ), 400
+        if form.get("stocked_in_at", "").strip() and stocked_in is None:
+            flash("Stocked-in date must look like YYYY-MM-DD or YYYY-MM-DD HH:MM.", "error")
+            return render_template(
+                "unit_form.html", item=None, unit=unit, form=form,
+                stocked_in_at=stocked_in_at,
+            ), 400
         if code_clash(conn, serial, eam, exclude_unit_id=unit_id):
             flash("That S/N or EAM number is already registered to another unit.", "error")
-            return render_template("unit_form.html", item=None, unit=unit, form=form), 400
+            return render_template(
+                "unit_form.html", item=None, unit=unit, form=form,
+                stocked_in_at=stocked_in_at,
+            ), 400
         conn.execute(
             """UPDATE units SET serial_no = ?, eam_no = ?, site = ?, funding = ?, project = ?,
                project_code = ?, notes = ?, updated_at = ? WHERE id = ?""",
             (serial, eam, site, funding, project, project_code, notes, now_str(), unit_id),
         )
+        # Temporary: allow correcting the stocked-in date shown on Items.
+        if stocked_in:
+            in_tx = conn.execute(
+                """SELECT id FROM transactions
+                   WHERE unit_id = ? AND type = 'IN'
+                   ORDER BY created_at DESC, id DESC LIMIT 1""",
+                (unit_id,),
+            ).fetchone()
+            if in_tx is not None:
+                conn.execute(
+                    "UPDATE transactions SET created_at = ? WHERE id = ?",
+                    (stocked_in, in_tx["id"]),
+                )
+            conn.execute(
+                "UPDATE units SET created_at = ? WHERE id = ?",
+                (stocked_in, unit_id),
+            )
         conn.commit()
         flash(f"Saved changes to unit {eam or serial}.", "success")
         return redirect(url_for("item_detail", item_id=unit["item_id"]))
-    return render_template("unit_form.html", item=None, unit=unit, form={})
+    return render_template(
+        "unit_form.html", item=None, unit=unit, form={},
+        stocked_in_at=stocked_in_at,
+    )
 
 
 @app.route("/units/<int:unit_id>/delete", methods=["POST"])
@@ -1177,24 +1756,311 @@ def delete_unit(unit_id):
 
 
 # ---------------------------------------------------------------------------
+# Packages (stock-out kit checklists)
+# ---------------------------------------------------------------------------
+
+PACKAGE_MATCH_TYPES = ("category", "sku", "item")
+ACCESSORY_SKU_LABELS = {
+    "MS-WIRED": "Mouse (Wired)",
+    "MS-WIRELESS": "Mouse (Wireless)",
+    "KB-WIRED": "Keyboard (Wired)",
+    "KB-WIRELESS": "Keyboard (Wireless)",
+}
+
+
+def _package_or_404(package_id):
+    pkg = database.get_db().execute(
+        "SELECT * FROM packages WHERE id = ?", (package_id,)
+    ).fetchone()
+    if pkg is None:
+        abort(404)
+    return pkg
+
+
+def _package_lines(conn, package_id):
+    return conn.execute(
+        """SELECT * FROM package_lines WHERE package_id = ?
+           ORDER BY sort_order, id""",
+        (package_id,),
+    ).fetchall()
+
+
+def _packages_payload(conn):
+    """JSON-friendly package list for the stock-out checklist."""
+    pkgs = conn.execute(
+        "SELECT * FROM packages ORDER BY name COLLATE NOCASE"
+    ).fetchall()
+    out = []
+    for p in pkgs:
+        lines = [
+            {
+                "id": ln["id"],
+                "label": ln["label"],
+                "match_type": ln["match_type"],
+                "match_value": ln["match_value"],
+                "quantity": ln["quantity"],
+            }
+            for ln in _package_lines(conn, p["id"])
+        ]
+        out.append({"id": p["id"], "name": p["name"], "notes": p["notes"], "lines": lines})
+    return out
+
+
+def _package_form_options(conn):
+    cats = {
+        r["category"]
+        for r in conn.execute(
+            "SELECT DISTINCT category FROM items WHERE category <> ''"
+        ).fetchall()
+    }
+    for c in (*IMPORT_ITEM_CHOICES, *PRESET_CATEGORIES):
+        if c.lower() not in {"keyboard", "mouse"}:
+            cats.add(c)
+    categories = sorted(cats, key=lambda s: s.lower())
+    items = conn.execute(
+        """SELECT id, name, sku, category FROM items
+           WHERE sku = '' OR UPPER(sku) NOT IN ({skus})
+           ORDER BY name COLLATE NOCASE""".format(
+            skus=",".join("?" * len(ACCESSORY_SKUS))
+        ),
+        sorted(ACCESSORY_SKUS),
+    ).fetchall()
+    return categories, items
+
+
+def _parse_package_lines(form):
+    """Build validated package line dicts from parallel form arrays."""
+    labels = form.getlist("line_label")
+    types = form.getlist("line_match_type")
+    values = form.getlist("line_match_value")
+    qtys = form.getlist("line_qty")
+    n = len(labels)
+    if not (len(types) == len(values) == len(qtys) == n):
+        return None, "Package lines are incomplete — please try again."
+    lines = []
+    for i in range(n):
+        label = labels[i].strip()
+        match_type = types[i].strip()
+        match_value = values[i].strip()
+        qty = form_int(qtys[i], default=0)
+        if not label and not match_value and qty <= 0:
+            continue
+        if not label:
+            return None, "Each package line needs a label."
+        if match_type not in PACKAGE_MATCH_TYPES:
+            return None, f"Unknown match type on line “{label}”."
+        if not match_value:
+            return None, f"Choose what “{label}” matches (category, SKU or item)."
+        if qty < 1 or qty > 100:
+            return None, f"Quantity for “{label}” must be between 1 and 100."
+        if match_type == "sku":
+            match_value = match_value.upper()
+            if match_value not in ACCESSORY_SKUS:
+                return None, f"SKU “{match_value}” is not a keyboard/mouse SKU."
+        elif match_type == "item":
+            if form_int(match_value, default=-1) < 1:
+                return None, f"Pick a catalog item for “{label}”."
+        lines.append({
+            "label": label,
+            "match_type": match_type,
+            "match_value": match_value,
+            "quantity": qty,
+            "sort_order": len(lines),
+        })
+    if not lines:
+        return None, "Add at least one line to the package."
+    return lines, None
+
+
+def _save_package_lines(conn, package_id, lines):
+    conn.execute("DELETE FROM package_lines WHERE package_id = ?", (package_id,))
+    for ln in lines:
+        conn.execute(
+            """INSERT INTO package_lines
+               (package_id, label, match_type, match_value, quantity, sort_order)
+               VALUES (?,?,?,?,?,?)""",
+            (package_id, ln["label"], ln["match_type"], ln["match_value"],
+             ln["quantity"], ln["sort_order"]),
+        )
+
+
+@app.route("/packages")
+def packages():
+    conn = database.get_db()
+    rows = conn.execute(
+        """SELECT p.*,
+                  (SELECT COUNT(*) FROM package_lines pl WHERE pl.package_id = p.id) AS line_count
+           FROM packages p ORDER BY p.name COLLATE NOCASE"""
+    ).fetchall()
+    return render_template("packages.html", packages=rows)
+
+
+@app.route("/packages/new", methods=["GET", "POST"])
+def new_package():
+    conn = database.get_db()
+    categories, items = _package_form_options(conn)
+    if request.method == "POST":
+        form = request.form
+        name = form.get("name", "").strip()
+        notes = form.get("notes", "").strip()
+        lines, err = _parse_package_lines(form)
+        if not name:
+            flash("Give the package a name (e.g. OA PC).", "error")
+            return render_template(
+                "package_form.html", package=None, lines=[], form=form,
+                categories=categories, items=items, accessory_skus=ACCESSORY_SKU_LABELS,
+            ), 400
+        if err:
+            flash(err, "error")
+            return render_template(
+                "package_form.html", package=None, lines=[], form=form,
+                categories=categories, items=items, accessory_skus=ACCESSORY_SKU_LABELS,
+            ), 400
+        now = now_str()
+        try:
+            cur = conn.execute(
+                "INSERT INTO packages (name, notes, created_at, updated_at) VALUES (?,?,?,?)",
+                (name, notes, now, now),
+            )
+            _save_package_lines(conn, cur.lastrowid, lines)
+            conn.commit()
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            flash(f"A package named “{name}” already exists.", "error")
+            return render_template(
+                "package_form.html", package=None, lines=[], form=form,
+                categories=categories, items=items, accessory_skus=ACCESSORY_SKU_LABELS,
+            ), 400
+        flash(f"Created package “{name}” with {len(lines)} line{'s' if len(lines) != 1 else ''}.",
+              "success")
+        return redirect(url_for("packages"))
+    return render_template(
+        "package_form.html", package=None, lines=[], form={},
+        categories=categories, items=items, accessory_skus=ACCESSORY_SKU_LABELS,
+    )
+
+
+@app.route("/packages/<int:package_id>/edit", methods=["GET", "POST"])
+def edit_package(package_id):
+    pkg = _package_or_404(package_id)
+    conn = database.get_db()
+    categories, items = _package_form_options(conn)
+    if request.method == "POST":
+        form = request.form
+        name = form.get("name", "").strip()
+        notes = form.get("notes", "").strip()
+        lines, err = _parse_package_lines(form)
+        if not name:
+            flash("Give the package a name (e.g. OA PC).", "error")
+            return render_template(
+                "package_form.html", package=pkg, lines=_package_lines(conn, package_id),
+                form=form, categories=categories, items=items,
+                accessory_skus=ACCESSORY_SKU_LABELS,
+            ), 400
+        if err:
+            flash(err, "error")
+            return render_template(
+                "package_form.html", package=pkg, lines=_package_lines(conn, package_id),
+                form=form, categories=categories, items=items,
+                accessory_skus=ACCESSORY_SKU_LABELS,
+            ), 400
+        try:
+            conn.execute(
+                "UPDATE packages SET name = ?, notes = ?, updated_at = ? WHERE id = ?",
+                (name, notes, now_str(), package_id),
+            )
+            _save_package_lines(conn, package_id, lines)
+            conn.commit()
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            flash(f"A package named “{name}” already exists.", "error")
+            return render_template(
+                "package_form.html", package=pkg, lines=_package_lines(conn, package_id),
+                form=form, categories=categories, items=items,
+                accessory_skus=ACCESSORY_SKU_LABELS,
+            ), 400
+        flash(f"Saved package “{name}”.", "success")
+        return redirect(url_for("packages"))
+    return render_template(
+        "package_form.html", package=pkg, lines=_package_lines(conn, package_id),
+        form={}, categories=categories, items=items, accessory_skus=ACCESSORY_SKU_LABELS,
+    )
+
+
+@app.route("/packages/<int:package_id>/delete", methods=["POST"])
+def delete_package(package_id):
+    pkg = _package_or_404(package_id)
+    conn = database.get_db()
+    conn.execute("DELETE FROM packages WHERE id = ?", (package_id,))
+    conn.commit()
+    flash(f"Deleted package “{pkg['name']}”.", "success")
+    return redirect(url_for("packages"))
+
+
+# ---------------------------------------------------------------------------
 # Stock in / out
 # ---------------------------------------------------------------------------
 
+def _stock_in_categories(conn):
+    """Categories offered when registering a new product on Stock In.
+
+    Preferred choices (OA PC, KB/MS wired-wireless, LAN Cable, …) come first;
+    any other categories already in the DB follow, excluding the plain
+    Keyboard/Mouse labels replaced by wired/wireless variants.
+    """
+    preferred = list(STOCK_IN_CATEGORY_CHOICES)
+    seen = {c.lower() for c in preferred}
+    skip = {"keyboard", "mouse"}
+    extras = []
+    for c in (*PRESET_CATEGORIES,):
+        if c.lower() in seen or c.lower() in skip:
+            continue
+        extras.append(c)
+        seen.add(c.lower())
+    for r in conn.execute(
+        "SELECT DISTINCT category FROM items WHERE category <> ''"
+    ).fetchall():
+        c = r["category"]
+        if c.lower() in seen or c.lower() in skip:
+            continue
+        extras.append(c)
+        seen.add(c.lower())
+    extras.sort(key=lambda s: s.lower())
+    return preferred + extras
+
+
 def _stock_form(tx_type):
     conn = database.get_db()
+    # has_tagged: at least one unit with an S/N or EAM — those stay out of the
+    # N/A (untagged) existing-product list on Stock In.
     item_rows = conn.execute(
-        "SELECT * FROM items ORDER BY name COLLATE NOCASE"
+        f"""SELECT i.*,
+                   EXISTS (
+                     SELECT 1 FROM units u
+                     WHERE u.item_id = i.id
+                       AND (u.serial_no <> '' OR u.eam_no <> '')
+                   ) AS has_tagged
+            FROM items i
+            ORDER BY i.name COLLATE NOCASE"""
     ).fetchall()
     accessory = conn.execute(
         f"""SELECT * FROM items WHERE sku IN
             ({",".join("?" * len(ACCESSORY_SKUS))})""",
         sorted(ACCESSORY_SKUS),
     ).fetchall()
+    packages = []
+    categories = []
+    if tx_type == "OUT":
+        packages = _packages_payload(conn)
+    else:
+        categories = _stock_in_categories(conn)
     return render_template(
         "scan_form.html",
         tx_type=tx_type,
         items=item_rows,
         items_by_sku={r["sku"].upper(): r for r in accessory},
+        packages=packages,
+        categories=categories,
     )
 
 
@@ -1283,12 +2149,26 @@ def _record_stock(tx_type):
                               "Nothing was recorded.", "error")
                         return _stock_form(tx_type), 400
                 if op["kind"] == "bulk":
-                    # Only keyboards and mice are untagged; everything else
-                    # moves as individually scanned units.
-                    if item["sku"].upper() not in ACCESSORY_SKUS:
+                    # Untagged stock (KB/MS SKUs, LAN cables, etc.) moves by
+                    # quantity. Items that already have registered units stay
+                    # unit-tracked — except the dedicated accessory SKUs.
+                    sku = (item["sku"] or "").upper()
+                    if sku not in ACCESSORY_SKUS:
+                        has_units = conn.execute(
+                            "SELECT 1 FROM units WHERE item_id = ? LIMIT 1",
+                            (item["id"],),
+                        ).fetchone()
+                        if has_units is not None:
+                            flash(
+                                f"“{item['name']}” is tracked per unit — scan its "
+                                "EAM tag or serial number instead. Nothing was recorded.",
+                                "error",
+                            )
+                            return _stock_form(tx_type), 400
+                    if op["qty"] < 1 or op["qty"] > ACCESSORY_MAX_QTY:
                         flash(
-                            f"“{item['name']}” is tracked per unit — scan its "
-                            "EAM tag or serial number instead. Nothing was recorded.",
+                            f"Quantity for “{item['name']}” must be between 1 and "
+                            f"{ACCESSORY_MAX_QTY}. Nothing was recorded.",
                             "error",
                         )
                         return _stock_form(tx_type), 400
@@ -1306,6 +2186,7 @@ def _record_stock(tx_type):
         # stay flagged so any later return warns the operator.
         on_loan = tx_type == "OUT" and form.get("on_loan") == "1"
         condemned = tx_type == "OUT" and form.get("condemned") == "1"
+        follow_up = tx_type == "OUT" and form.get("follow_up") == "1"
         if on_loan and condemned:
             flash("A batch can't be both on loan and condemned — pick one. "
                   "Nothing was recorded.", "error")
@@ -1379,10 +2260,11 @@ def _record_stock(tx_type):
                             )
                     conn.execute(
                         """INSERT INTO transactions
-                           (item_id, unit_id, type, quantity, person, department, reference, staff_id, site, on_loan, condemned, notes, created_at)
-                           VALUES (?,?,?,1,?,?,?,?,?,?,?,?,?)""",
+                           (item_id, unit_id, type, quantity, person, department, reference, staff_id, site, on_loan, condemned, follow_up, notes, created_at)
+                           VALUES (?,?,?,1,?,?,?,?,?,?,?,?,?,?)""",
                         (unit["item_id"], unit["id"], tx_type, person, dept, ref_no, staff_id,
-                         site, 1 if on_loan else 0, 1 if condemned else 0, notes, now),
+                         site, 1 if on_loan else 0, 1 if condemned else 0,
+                         1 if follow_up else 0, notes, now),
                     )
                     moved += 1
                 elif op["kind"] == "new":
@@ -1406,10 +2288,11 @@ def _record_stock(tx_type):
                     )
                     conn.execute(
                         """INSERT INTO transactions
-                           (item_id, unit_id, type, quantity, person, department, reference, staff_id, site, notes, created_at)
-                           VALUES (?,NULL,?,?,?,?,?,?,?,?,?)""",
+                           (item_id, unit_id, type, quantity, person, department, reference, staff_id, site, on_loan, condemned, follow_up, notes, created_at)
+                           VALUES (?,NULL,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (op["ref"], tx_type, op["qty"], person, dept, ref_no, staff_id,
-                         site, notes, now),
+                         site, 1 if on_loan else 0, 1 if condemned else 0,
+                         1 if follow_up else 0, notes, now),
                     )
                     moved += op["qty"]
             conn.commit()
@@ -1423,7 +2306,8 @@ def _record_stock(tx_type):
             f"Recorded {moved} unit{'s' if moved != 1 else ''} across "
             f"{len(ops)} row{'s' if len(ops) != 1 else ''} {direction} stock"
             f"{' — marked as on loan' if on_loan else ''}"
-            f"{' — marked as condemned' if condemned else ''}.",
+            f"{' — marked as condemned' if condemned else ''}"
+            f"{' — follow up' if follow_up else ''}.",
             "success",
         )
         if condemned_back:
@@ -1431,6 +2315,19 @@ def _record_stock(tx_type):
                 "Condemned stock returned: " + ", ".join(condemned_back) +
                 " — inspect and quarantine before shelving.", "warning",
             )
+        if tx_type == "OUT" and not person:
+            ok, detail = _stock_out_admin_alert(
+                ops, dept, ref_no, staff_id, notes, follow_up,
+                session.get("username", ""),
+            )
+            if ok:
+                flash("No custodian entered — admin was emailed.", "warning")
+            else:
+                flash(
+                    "No custodian entered — could not email admin "
+                    f"({detail}). Check STOCK_SMTP_* settings.",
+                    "warning",
+                )
         return redirect(url_for("history"))
 
     return _stock_form(tx_type)
@@ -1455,7 +2352,9 @@ def history():
     where, params, tx_type, q, date_from, date_to = history_filters(request.args)
     conn = database.get_db()
     total = conn.execute(
-        f"SELECT COUNT(*) AS c FROM transactions t JOIN items i ON i.id = t.item_id{where}",
+        f"""SELECT COUNT(*) AS c FROM transactions t
+            JOIN items i ON i.id = t.item_id
+            LEFT JOIN units u ON u.id = t.unit_id{where}""",
         params,
     ).fetchone()["c"]
     pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -1499,7 +2398,7 @@ def history_csv():
     writer.writerow(
         ["Date", "Type", "Item", "SKU", "Unit EAM", "Unit S/N", "Quantity",
          "Person", "Department", "Reference", "Site", "Staff ID", "On Loan",
-         "Condemned", "Notes"]
+         "Condemned", "Follow up", "Notes"]
     )
     for r in rows:
         writer.writerow(
@@ -1509,6 +2408,7 @@ def history_csv():
                 r["quantity"], csv_safe(r["person"]), csv_safe(r["department"]),
                 csv_safe(r["reference"]), csv_safe(r["site"]), csv_safe(r["staff_id"]),
                 "Yes" if r["on_loan"] else "", "Yes" if r["condemned"] else "",
+                "Yes" if r["follow_up"] else "",
                 csv_safe(r["notes"]),
             ]
         )
@@ -1553,7 +2453,7 @@ def api_lookup():
     conn = database.get_db()
     unit = conn.execute(
         """SELECT u.id AS unit_id, u.status, u.serial_no, u.eam_no, u.on_loan, u.condemned,
-                  i.id, i.name, i.sku,
+                  i.id, i.name, i.sku, i.category,
                   (SELECT t.person FROM transactions t
                    WHERE t.unit_id = u.id AND t.type = 'OUT'
                    ORDER BY t.created_at DESC, t.id DESC LIMIT 1) AS holder
@@ -1568,7 +2468,7 @@ def api_lookup():
             row["holder"] = ""
         return jsonify({"type": "unit", **row})
     item = conn.execute(
-        f"""SELECT i.id, i.name, i.sku, i.quantity, {UNITS_IN_SQL} AS units_in
+        f"""SELECT i.id, i.name, i.sku, i.category, i.quantity, {UNITS_IN_SQL} AS units_in
             FROM items i WHERE i.sku = ? COLLATE NOCASE LIMIT 1""",
         (code,),
     ).fetchone()
@@ -1577,15 +2477,86 @@ def api_lookup():
     return jsonify({"error": "not found"}), 404
 
 
-@app.route("/api/items")
+@app.route("/api/items", methods=["GET", "POST"])
 def api_items():
-    rows = database.get_db().execute(
-        f"""SELECT i.id, i.name, i.sku, i.category, i.brand, i.model,
-                   i.quantity AS untagged, i.min_quantity, i.location,
-                   {UNITS_IN_SQL} AS tracked_in, {UNITS_OUT_SQL} AS tracked_out
-            FROM items i ORDER BY i.name COLLATE NOCASE"""
-    ).fetchall()
-    return jsonify([dict(r) for r in rows])
+    conn = database.get_db()
+    if request.method == "GET":
+        rows = conn.execute(
+            f"""SELECT i.id, i.name, i.sku, i.category, i.brand, i.model,
+                       i.quantity AS untagged, i.min_quantity, i.location,
+                       {UNITS_IN_SQL} AS tracked_in, {UNITS_OUT_SQL} AS tracked_out
+                FROM items i ORDER BY i.name COLLATE NOCASE"""
+        ).fetchall()
+        return jsonify([dict(r) for r in rows])
+
+    # Create (or reuse) a catalog item so Stock In can register units against it.
+    payload = request.get_json(silent=True) or {}
+    name = (payload.get("name") or request.form.get("name") or "").strip()
+    category_raw = (payload.get("category") or request.form.get("category") or "").strip()
+    brand = (payload.get("brand") or request.form.get("brand") or "").strip()
+    if len(brand) > 80:
+        return jsonify({"error": "Brand is too long."}), 400
+    if len(category_raw) > 80:
+        return jsonify({"error": "Category is too long."}), 400
+
+    # KB/MS wired/wireless categories map onto the fixed accessory SKU rows.
+    acc = _accessory_kind_from_category(category_raw)
+    if acc is not None:
+        try:
+            row = _ensure_accessory_item(conn, acc[0], acc[1], brand=brand)
+            conn.commit()
+        except (ValueError, sqlite3.Error) as exc:
+            conn.rollback()
+            return jsonify({"error": str(exc) or "Could not match keyboard/mouse stock."}), 500
+        status = 201 if row.pop("created") else 200
+        row["created"] = status == 201
+        return jsonify(row), status
+
+    category = _category_for(category_raw)
+    if not name:
+        return jsonify({"error": "Product name is required."}), 400
+    if len(name) > 120:
+        return jsonify({"error": "Product name is too long."}), 400
+    if not category:
+        return jsonify({"error": "Item category is required."}), 400
+    existing = conn.execute(
+        """SELECT id, name, sku, category, brand, model, quantity FROM items
+           WHERE name = ? COLLATE NOCASE AND category = ? COLLATE NOCASE""",
+        (name, category),
+    ).fetchone()
+    if existing is not None:
+        if brand and not (existing["brand"] or "").strip():
+            conn.execute(
+                "UPDATE items SET brand = ?, updated_at = ? WHERE id = ?",
+                (brand, now_str(), existing["id"]),
+            )
+            conn.commit()
+            existing = dict(existing)
+            existing["brand"] = brand
+        return jsonify({"created": False, **dict(existing)})
+    now = now_str()
+    try:
+        cur = conn.execute(
+            """INSERT INTO items
+               (name, sku, category, brand, model, quantity, min_quantity,
+                location, notes, created_at, updated_at)
+               VALUES (?,?,?,?,?,0,0,?,?,?,?)""",
+            (name, "", category, brand, name, "", "", now, now),
+        )
+        conn.commit()
+    except sqlite3.Error:
+        conn.rollback()
+        return jsonify({"error": "Could not create the product."}), 500
+    return jsonify({
+        "created": True,
+        "id": cur.lastrowid,
+        "name": name,
+        "sku": "",
+        "category": category,
+        "brand": brand,
+        "model": name,
+        "quantity": 0,
+    }), 201
 
 
 @app.route("/api/summary")

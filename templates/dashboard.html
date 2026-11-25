@@ -70,7 +70,13 @@
             <td><span class="pill {{ 'pill-in' if t["type"] == 'IN' else 'pill-out' }}">{{ 'In' if t["type"] == 'IN' else 'Out' }}</span></td>
             <td>
               <a class="item-name" href="{{ url_for('item_detail', item_id=t["item_id"]) }}">{{ t["item_name"] }}</a>
-              {% if t["unit_eam"] or t["unit_serial"] %}<div class="muted small mono">{{ t["unit_eam"] or t["unit_serial"] }}</div>{% endif %}
+              {% if t["unit_eam"] or t["unit_serial"] %}
+              <div class="muted small mono">
+                {%- if t["unit_eam"] %}EAM {{ t["unit_eam"] }}{% endif -%}
+                {%- if t["unit_eam"] and t["unit_serial"] %} · {% endif -%}
+                {%- if t["unit_serial"] %}S/N {{ t["unit_serial"] }}{% endif -%}
+              </div>
+              {% endif %}
             </td>
             <td class="num"><span class="{{ 'qty-in' if t["type"] == 'IN' else 'qty-out' }}">{{ '+' if t["type"] == 'IN' else '−' }}{{ t["quantity"] }}</span></td>
             <td>{{ t["person"] or '—' }}</td>

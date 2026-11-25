@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% set total = item["quantity"] + counts["units_in"] %}
 {% set is_low = item["min_quantity"] > 0 and total <= item["min_quantity"] %}
+{% set highlight_unit_id = highlight_unit_id|default(none) %}
 {% block title %}{{ item["name"] }}{% endblock %}
 {% block heading %}{{ item["name"] }}{% endblock %}
 {% block actions %}
@@ -84,9 +85,12 @@
     </thead>
     <tbody>
       {% for u in units %}
-      <tr data-status="{{ u["status"] }}"
+      <tr id="unit-{{ u['id'] }}"
+          data-unit-id="{{ u['id'] }}"
+          data-status="{{ u["status"] }}"
           data-condemned="{{ 1 if u['condemned'] else 0 }}"
-          data-stocked-year="{{ u['stocked_in_at'][:4] if u['stocked_in_at'] else '' }}">
+          data-stocked-year="{{ u['stocked_in_at'][:4] if u['stocked_in_at'] else '' }}"
+          class="{{ 'unit-highlight' if highlight_unit_id == u['id'] else '' }}">
         <td class="mono">{{ u["eam_no"] or '—' }}</td>
         <td class="mono">{{ u["serial_no"] or '—' }}</td>
         <td>{{ u["site"] or '—' }}</td>
@@ -127,14 +131,15 @@
   {% if history %}
   <table class="table">
     <thead>
-      <tr><th>Date</th><th>Type</th><th>EAM/Asset No.</th><th class="num">Qty</th><th>Person</th><th>Department</th><th>Reference</th><th>Notes</th></tr>
+      <tr><th>Date</th><th>Type</th><th>Asset/EAM</th><th>S/N</th><th class="num">Qty</th><th>Person</th><th>Department</th><th>Reference</th><th>Notes</th></tr>
     </thead>
     <tbody>
       {% for t in history %}
       <tr>
         <td class="nowrap">{{ t["created_at"] }}</td>
         <td><span class="pill {{ 'pill-in' if t["type"] == 'IN' else 'pill-out' }}">{{ 'In' if t["type"] == 'IN' else 'Out' }}</span>{% if t["on_loan"] %}<span class="pill pill-loan">On loan</span>{% endif %}{% if t["condemned"] %}<span class="pill pill-condemn">Condemned</span>{% endif %}</td>
-        <td class="mono">{{ t["unit_eam"] or t["unit_serial"] or '—' }}</td>
+        <td class="mono">{{ t["unit_eam"] or '—' }}</td>
+        <td class="mono">{{ t["unit_serial"] or '—' }}</td>
         <td class="num"><span class="{{ 'qty-in' if t["type"] == 'IN' else 'qty-out' }}">{{ '+' if t["type"] == 'IN' else '−' }}{{ t["quantity"] }}</span></td>
         <td>{{ t["person"] or '—' }}</td>
         <td>{{ t["department"] or '—' }}</td>

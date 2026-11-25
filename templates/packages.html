@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Packages{% endblock %}
+{% block heading %}Stock-out packages{% endblock %}
+{% block actions %}
+  <a class="btn btn-primary" href="{{ url_for('new_package') }}">New package</a>
+{% endblock %}
+{% block content %}
+{% if packages %}
+<div class="card table-card">
+  <div class="card-head">
+    <h2>Packages</h2>
+    <span class="muted small">{{ packages | length }} kit{{ 's' if packages | length != 1 }}</span>
+  </div>
+  <table class="table">
+    <thead>
+      <tr><th>Name</th><th>Lines</th><th>Notes</th><th>Updated</th><th class="actions-col"></th></tr>
+    </thead>
+    <tbody>
+      {% for p in packages %}
+      <tr>
+        <td><a class="item-name" href="{{ url_for('edit_package', package_id=p['id']) }}">{{ p["name"] }}</a></td>
+        <td class="num">{{ p["line_count"] }}</td>
+        <td class="muted">{{ p["notes"] or '—' }}</td>
+        <td class="nowrap muted">{{ p["updated_at"] }}</td>
+        <td class="actions-col">
+          <div class="row-actions">
+            <a class="btn btn-sm btn-ghost" href="{{ url_for('edit_package', package_id=p['id']) }}">Edit</a>
+            <form method="post" action="{{ url_for('delete_package', package_id=p['id']) }}"
+                  data-confirm="Delete package {{ p['name'] }}? Stock-out history is unchanged.">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <button class="btn btn-sm btn-danger-ghost" type="submit">Delete</button>
+            </form>
+          </div>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="card empty">
+  <h2>No packages yet</h2>
+  <p class="muted">Define kits such as “OA PC” (1 PC + 1 Monitor + wired keyboard + mouse).
+    On Stock Out, pick a package to get a live checklist as you scan.</p>
+  <a class="btn btn-primary" href="{{ url_for('new_package') }}">Create the first package</a>
+</div>
+{% endif %}
+{% endblock %}

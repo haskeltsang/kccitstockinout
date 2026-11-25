@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% set editing = package is not none %}
+{% block title %}{{ 'Edit package' if editing else 'New package' }}{% endblock %}
+{% block heading %}{{ 'Edit package' if editing else 'New package' }}{% endblock %}
+{% block content %}
+<div class="card form-card">
+  <p class="muted form-intro">
+    A package is a stock-out checklist — for example <strong>OA PC</strong> needing
+    1 PC, 1 Monitor, 1 wired keyboard and 1 wired mouse. Lines match by
+    <em>category</em> (any unit in that category), <em>SKU</em> (keyboard/mouse),
+    or a specific catalog <em>item</em>.
+  </p>
+  <form method="post" class="form-grid" id="package-form">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <div class="field">
+      <label for="name">Package name <span class="req">*</span></label>
+      <input class="input" id="name" name="name" maxlength="80" required
+             value="{{ form.get('name', package['name'] if editing else '') }}"
+             placeholder="e.g. OA PC">
+    </div>
+    <div class="field">
+      <label for="notes">Notes (optional)</label>
+      <input class="input" id="notes" name="notes" maxlength="200"
+             value="{{ form.get('notes', package['notes'] if editing else '') }}"
+             placeholder="e.g. standard new-joiner desk kit">
+    </div>
+
+    <div class="field span-2">
+      <div class="card-head" style="padding:0;margin-bottom:8px">
+        <h2>Checklist lines</h2>
+        <button type="button" class="btn btn-sm btn-ghost" id="add-line-btn">Add line</button>
+      </div>
+      <div class="table-scroll">
+        <table class="table" id="package-lines-table">
+          <thead>
+            <tr>
+              <th>Label</th>
+              <th>Match by</th>
+              <th>Matches</th>
+              <th class="num">Qty</th>
+              <th class="actions-col"></th>
+            </tr>
+          </thead>
+          <tbody id="package-lines-body">
+            {% if lines %}
+            {% for ln in lines %}
+            <tr class="pkg-line">
+              <td><input class="input" name="line_label" maxlength="80" required
+                         value="{{ ln['label'] }}" placeholder="e.g. PC"></td>
+              <td>
+                <select class="input line-match-type" name="line_match_type">
+                  <option value="category" {{ 'selected' if ln['match_type'] == 'category' }}>Category</option>
+                  <option value="sku" {{ 'selected' if ln['match_type'] == 'sku' }}>KB/MS SKU</option>
+                  <option value="item" {{ 'selected' if ln['match_type'] == 'item' }}>Catalog item</option>
+                </select>
+              </td>
+              <td>
+                <select class="input line-match-category" name="line_match_value"
+                        {{ '' if ln['match_type'] == 'category' else 'hidden disabled' }}>
+                  {% for c in categories %}
+                  <option value="{{ c }}" {{ 'selected' if ln['match_type'] == 'category' and ln['match_value'] == c }}>{{ c }}</option>
+                  {% endfor %}
+                </select>
+                <select class="input line-match-sku" name="line_match_value"
+                        {{ '' if ln['match_type'] == 'sku' else 'hidden disabled' }}>
+                  {% for sku, label in accessory_skus.items() %}
+                  <option value="{{ sku }}" {{ 'selected' if ln['match_type'] == 'sku' and ln['match_value'] == sku }}>{{ label }} ({{ sku }})</option>
+                  {% endfor %}
+                </select>
+                <select class="input line-match-item" name="line_match_value"
+                        {{ '' if ln['match_type'] == 'item' else 'hidden disabled' }}>
+                  {% for it in items %}
+                  <option value="{{ it['id'] }}" {{ 'selected' if ln['match_type'] == 'item' and ln['match_value'] == it['id']|string }}>
+                    {{ it["name"] }}{% if it["category"] %} · {{ it["category"] }}{% endif %}
+                  </option>
+                  {% endfor %}
+                </select>
+              </td>
+              <td class="num"><input class="input" type="number" name="line_qty" min="1" max="100" step="1" required value="{{ ln['quantity'] }}"></td>
+              <td class="actions-col"><button type="button" class="row-remove pkg-line-remove" aria-label="Remove line">×</button></td>
+            </tr>
+            {% endfor %}
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+      <p class="hint">Category matches any scanned unit in that category. KB/MS SKU matches
+        quantity handed out for that accessory. Catalog item matches that exact product.</p>
+    </div>
+
+    <div class="form-actions span-2">
+      <a class="btn btn-ghost" href="{{ url_for('packages') }}">Cancel</a>
+      <button class="btn btn-primary" type="submit">{{ 'Save package' if editing else 'Create package' }}</button>
+    </div>
+  </form>
+</div>
+
+<template id="pkg-line-template">
+  <tr class="pkg-line">
+    <td><input class="input" name="line_label" maxlength="80" required placeholder="e.g. Monitor"></td>
+    <td>
+      <select class="input line-match-type" name="line_match_type">
+        <option value="category" selected>Category</option>
+        <option value="sku">KB/MS SKU</option>
+        <option value="item">Catalog item</option>
+      </select>
+    </td>
+    <td>
+      <select class="input line-match-category" name="line_match_value">
+        {% for c in categories %}
+        <option value="{{ c }}">{{ c }}</option>
+        {% endfor %}
+      </select>
+      <select class="input line-match-sku" name="line_match_value" hidden disabled>
+        {% for sku, label in accessory_skus.items() %}
+        <option value="{{ sku }}">{{ label }} ({{ sku }})</option>
+        {% endfor %}
+      </select>
+      <select class="input line-match-item" name="line_match_value" hidden disabled>
+        {% for it in items %}
+        <option value="{{ it['id'] }}">{{ it["name"] }}{% if it["category"] %} · {{ it["category"] }}{% endif %}</option>
+        {% endfor %}
+      </select>
+    </td>
+    <td class="num"><input class="input" type="number" name="line_qty" min="1" max="100" step="1" required value="1"></td>
+    <td class="actions-col"><button type="button" class="row-remove pkg-line-remove" aria-label="Remove line">×</button></td>
+  </tr>
+</template>
+{% endblock %}

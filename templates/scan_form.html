@@ -3,11 +3,12 @@
 {% block title %}{{ 'Stock in' if is_in else 'Stock out' }}{% endblock %}
 {% block heading %}{{ 'Record stock in' if is_in else 'Record stock out' }}{% endblock %}
 {% block content %}
-{% if not items %}
+{% if not items and not is_in %}
 <div class="card empty">
   <h2>No items yet</h2>
-  <p class="muted">Import your asset list from Excel before recording stock movements.</p>
-  <a class="btn btn-primary" href="{{ url_for('import_stocks') }}">Import from Excel</a>
+  <p class="muted">Import your asset list from Excel, or stock items in first so they can be handed out.</p>
+  <a class="btn btn-primary" href="{{ url_for('stock_in') }}">Record stock in</a>
+  <a class="btn btn-ghost" href="{{ url_for('import_stocks') }}">Import from Excel</a>
 </div>
 {% else %}
 <div class="scan-layout {{ 'with-acc' if not is_in }}">
@@ -17,55 +18,155 @@
       <input form="finish-form" class="input scan-input" id="staff_id" name="staff_id" maxlength="40"
              placeholder="Your staff ID — or scan your staff card">
     </div>
-    <div class="scan-box">
+    <div class="scan-box" id="scan-box">
       <label for="scan-input">Scan barcode</label>
       <input id="scan-input" class="input scan-input" type="text" autocomplete="off" autofocus
              placeholder="EAM no., S/N or accessory SKU">
       <p class="hint">A barcode scanner works like a keyboard: it types the code and presses Enter.
         Untagged keyboards and mice move by SKU — type MS-WIRED, MS-WIRELESS, KB-WIRED or KB-WIRELESS.</p>
-      <div id="scan-status" class="scan-status" role="status" aria-live="polite"></div>
     </div>
+    <div id="scan-status" class="scan-status" role="status" aria-live="polite"></div>
 
     {% if is_in %}
-    <div class="scan-options">
+    <div class="scan-options" id="stock-in-register">
       <span class="scan-opt-label">New codes are</span>
       <div class="mode-toggle" id="mode-toggle">
         <button type="button" class="mode-btn" data-mode="eam">EAM no.</button>
         <button type="button" class="mode-btn active" data-mode="serial">S/N</button>
+        <button type="button" class="mode-btn" data-mode="both">S/N + EAM</button>
+        <button type="button" class="mode-btn" data-mode="na">N/A</button>
       </div>
-      <p class="hint" style="margin:0">New stock often has only an S/N — EAM is optional. Either one is enough.</p>
-      <label for="new-item-select" class="scan-opt-label">Register new units as</label>
-      <select id="new-item-select" class="input">
-        <option value="" selected disabled>Choose the product…</option>
-        {% for it in items %}
-        <option value="{{ it["id"] }}" data-name="{{ it["name"] }}">
-          {{ it["name"] }}{% if it["sku"] %} ({{ it["sku"] }}){% endif %}
-        </option>
-        {% endfor %}
-      </select>
+      <p class="hint" id="code-mode-hint" style="margin:0">New stock often has only an S/N — EAM is optional. Either one is enough.</p>
+
+      <div class="both-codes" id="both-codes-panel" hidden>
+        <div class="field">
+          <label for="both-serial">S/N <span class="req">*</span></label>
+          <input class="input mono" id="both-serial" type="text" maxlength="80"
+                 placeholder="Serial number" autocomplete="off">
+        </div>
+        <div class="field">
+          <label for="both-eam">Asset/EAM no. <span class="req">*</span></label>
+          <input class="input mono" id="both-eam" type="text" maxlength="80"
+                 placeholder="EAM / asset tag" autocomplete="off">
+        </div>
+        <button type="button" class="btn btn-primary" id="both-add-btn">Add to list</button>
+        <p class="hint">Type or scan into each field (a scanner still works in these boxes), then Add.</p>
+      </div>
+
+      <div class="untagged-qty" id="untagged-qty-panel" hidden>
+        <div class="field">
+          <label for="untagged-qty">Quantity to stock in <span class="req">*</span></label>
+          <input class="input" id="untagged-qty" type="number" min="1" max="10000" step="1" value="1">
+        </div>
+        <button type="button" class="btn btn-primary" id="untagged-add-btn">Add to list</button>
+        <p class="hint">For untagged stock (mouse, keyboard, LAN cable, etc.) — no S/N or EAM. Pick or create the product below, set the quantity, then Add.</p>
+      </div>
+
+      <span class="scan-opt-label">Register new units as</span>
+      <div class="mode-toggle" id="register-mode-toggle" role="group" aria-label="Product source">
+        <button type="button" class="mode-btn {{ 'active' if items else '' }}" data-reg-mode="existing"
+                {{ 'disabled' if not items }}>Existing product</button>
+        <button type="button" class="mode-btn {{ 'active' if not items else '' }}" data-reg-mode="new">New product</button>
+      </div>
+
+      <div class="reg-existing" id="reg-existing" {{ 'hidden' if not items else '' }}>
+        <label for="new-item-select" class="scan-opt-label">Product</label>
+        <select id="new-item-select" class="input">
+          <option value="" selected disabled>Choose the product…</option>
+          {% for it in items %}
+          <option value="{{ it['id'] }}"
+                  data-name="{{ it['name'] }}"
+                  data-category="{{ it['category'] }}"
+                  data-tagged="{{ 1 if it['has_tagged'] else 0 }}">
+            {{ it["name"] }}{% if it["category"] %} · {{ it["category"] }}{% endif %}{% if it["sku"] %} ({{ it["sku"] }}){% endif %}
+          </option>
+          {% endfor %}
+        </select>
+      </div>
+
+      <div class="reg-new" id="reg-new" {{ '' if not items else 'hidden' }}>
+        <div class="reg-new-fields">
+          <div class="field">
+            <label for="new-item-category">Item category <span class="req">*</span></label>
+            <select class="input" id="new-item-category">
+              <option value="" selected disabled>Choose a category…</option>
+              {% for c in categories %}
+              <option value="{{ c }}"
+                      {% if c in ['Keyboard (Wired)', 'Keyboard (Wireless)', 'Mouse (Wired)', 'Mouse (Wireless)'] %}
+                      data-accessory="1"
+                      {% endif %}>{{ c }}</option>
+              {% endfor %}
+              <option value="__other__">Other — type below…</option>
+            </select>
+          </div>
+          <div class="field" id="new-item-category-other-wrap" hidden>
+            <label for="new-item-category-other">Custom category <span class="req">*</span></label>
+            <input class="input" id="new-item-category-other" type="text" maxlength="80"
+                   placeholder="Type a category name" autocomplete="off">
+          </div>
+          <div class="field" id="new-item-name-wrap">
+            <label for="new-item-name">Product name <span class="req">*</span></label>
+            <input class="input" id="new-item-name" type="text" maxlength="120"
+                   placeholder="e.g. ThinkCentre M70" autocomplete="off">
+          </div>
+          <div class="field">
+            <label for="new-item-brand">Brand</label>
+            <input class="input" id="new-item-brand" type="text" maxlength="80"
+                   placeholder="e.g. Lenovo" autocomplete="off">
+          </div>
+        </div>
+        <p class="hint" id="reg-new-hint">Only needed for a new product. Creates it in the catalog (or reuses the same name + category), then registers scanned units under it. Keyboard/Mouse wired or wireless map to the shared stock SKUs automatically.</p>
+      </div>
     </div>
     {% endif %}
   </section>
 
   {% if not is_in %}
-  <section class="card accessory-out">
-    <span class="scan-opt-label">Keyboards &amp; mice — quantity to hand out</span>
-      {% for sku in ["MS-WIRED", "MS-WIRELESS", "KB-WIRED", "KB-WIRELESS"] %}
-      {% set it = items_by_sku.get(sku) %}
-      <div class="acc-row">
-        <label class="acc-name" for="acc-{{ sku|lower }}">{{ it["name"] if it else sku }}</label>
-        <span class="muted small">{{ it["quantity"] if it else 0 }} on hand</span>
-        <input class="input acc-qty" id="acc-{{ sku|lower }}" type="number"
-               min="0" max="{{ it["quantity"] if it else 0 }}" step="1" placeholder="0"
-               data-item-id="{{ it["id"] if it else "" }}"
-               data-name="{{ it["name"] if it else "" }}"
-               data-sku="{{ sku }}"
-               data-qty="{{ it["quantity"] if it else 0 }}"
-               {{ 'disabled' if not it or it["quantity"] == 0 }}>
+  <div class="scan-side">
+    <section class="card package-check" id="package-panel">
+      <div class="card-head" style="margin-bottom:8px">
+        <h2>Package checklist</h2>
       </div>
-      {% endfor %}
-      <p class="hint">Top up keyboards and mice on the Import page.</p>
-  </section>
+      <div class="field">
+        <label for="package-select">Kit for this hand-out</label>
+        <select class="input" id="package-select">
+          <option value="">No package — free scan</option>
+          {% for p in packages %}
+          <option value="{{ p['id'] }}">{{ p["name"] }}</option>
+          {% endfor %}
+        </select>
+        {% if not packages %}
+        <p class="hint">No packages yet — create kits on the <a href="{{ url_for('packages') }}">Packages</a> page.</p>
+        {% else %}
+        <p class="hint">Pick a kit to tick off required items as you scan. Finish still works if the list is incomplete.</p>
+        {% endif %}
+      </div>
+      <ul class="pkg-checklist" id="package-checklist" hidden></ul>
+      <p class="muted small" id="package-progress" hidden></p>
+    </section>
+    <script type="application/json" id="packages-data">{{ packages | tojson }}</script>
+
+    <section class="card accessory-out">
+      <span class="scan-opt-label">Keyboards &amp; mice — quantity to hand out</span>
+        {% for sku in ["MS-WIRED", "MS-WIRELESS", "KB-WIRED", "KB-WIRELESS"] %}
+        {% set it = items_by_sku.get(sku) %}
+        <div class="acc-row">
+          <label class="acc-name" for="acc-{{ sku|lower }}">{{ it["name"] if it else sku }}</label>
+          <span class="muted small">{{ it["quantity"] if it else 0 }} on hand</span>
+          <input class="input acc-qty" id="acc-{{ sku|lower }}" type="number"
+                 min="0" max="{{ it["quantity"] if it else 0 }}" step="1" placeholder="0"
+                 data-item-id="{{ it["id"] if it else "" }}"
+                 data-name="{{ it["name"] if it else "" }}"
+                 data-sku="{{ sku }}"
+                 data-category="{{ it['category'] if it else 'Peripheral' }}"
+                 data-qty="{{ it["quantity"] if it else 0 }}"
+                 {{ 'disabled' if not it or it["quantity"] == 0 }}>
+        </div>
+        {% endfor %}
+        <p class="hint">Scanning an OA PC / desktop PC auto-adds 1 wired keyboard and
+          1 wired mouse per PC. Top up stock on the Import page.</p>
+    </section>
+  </div>
   {% endif %}
 
   <form method="post" class="card batch-card" id="finish-form" data-tx-type="{{ tx_type }}">
@@ -86,6 +187,12 @@
           <input type="checkbox" id="condemned" name="condemned" value="1">
           <span class="loan-switch" aria-hidden="true"></span>
           <span class="loan-label">Condemnation</span>
+        </label>
+        <label class="loan-toggle followup-toggle" for="follow_up"
+               title="Flag this hand-out so it can be chased later">
+          <input type="checkbox" id="follow_up" name="follow_up" value="1">
+          <span class="loan-switch" aria-hidden="true"></span>
+          <span class="loan-label">Need to follow up</span>
         </label>
         {% endif %}
       </div>
@@ -113,6 +220,9 @@
         <label for="person">{{ 'Supplier / source' if is_in else 'Custodian' }}</label>
         <input class="input" id="person" name="person" maxlength="80"
                placeholder="{{ 'e.g. TechVendor Pte Ltd' if is_in else 'e.g. Alice Tan' }}">
+        {% if not is_in %}
+        <p class="hint">Leave blank only if unknown — admin is emailed automatically.</p>
+        {% endif %}
       </div>
       {% if not is_in %}
       <div class="field loan-req">
