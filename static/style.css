@@ -605,11 +605,27 @@ textarea.input { resize: vertical; }
   .untagged-out-pick { grid-template-columns: 1fr; }
 }
 
-.minlevel-form {
+.item-edit-form {
   margin-top: 12px;
   padding-top: 12px;
   border-top: 1px solid var(--line);
 }
+.item-edit-grid {
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+.item-edit-locked {
+  margin: 12px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.minlevel-form,
+.item-merge-form {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.item-merge-form .field { margin-bottom: 10px; }
 .minlevel-row {
   display: flex;
   gap: 8px;

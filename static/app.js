@@ -174,12 +174,53 @@
     }
   }
 
+  // ---- Item detail: category + model edit (Other category) ----------------
+  var itemCategory = document.getElementById("item-category");
+  var itemCategoryOther = document.getElementById("item-category-other");
+  var itemCategoryOtherWrap = document.getElementById("item-category-other-wrap");
+  if (itemCategory && itemCategoryOtherWrap) {
+    var syncItemCategoryOther = function () {
+      var isOther = itemCategory.value === "__other__";
+      itemCategoryOtherWrap.hidden = !isOther;
+      if (itemCategoryOther) {
+        itemCategoryOther.disabled = !isOther;
+        if (!isOther) itemCategoryOther.value = "";
+      }
+    };
+    itemCategory.addEventListener("change", syncItemCategoryOther);
+    syncItemCategoryOther();
+  }
+
   // ---- Package form: dynamic checklist lines ------------------------------
   var pkgForm = document.getElementById("package-form");
   if (pkgForm) {
     var pkgBody = document.getElementById("package-lines-body");
     var pkgTpl = document.getElementById("pkg-line-template");
     var addLineBtn = document.getElementById("add-line-btn");
+    var matchLabelFor = function (row) {
+      var typeSel = row.querySelector(".line-match-type");
+      if (!typeSel) return "";
+      var type = typeSel.value;
+      var sel = row.querySelector(".line-match-" + type);
+      if (!sel || sel.selectedIndex < 0) return "";
+      var opt = sel.options[sel.selectedIndex];
+      if (!opt) return "";
+      var custom = (opt.getAttribute("data-label") || "").trim();
+      if (custom) return custom.slice(0, 80);
+      return (opt.textContent || "").trim().slice(0, 80);
+    };
+    var syncLineLabel = function (row, force) {
+      var input = row.querySelector('input[name="line_label"]');
+      if (!input) return;
+      var next = matchLabelFor(row);
+      var prevAuto = input.getAttribute("data-auto-label");
+      var cur = input.value;
+      // Fill when empty, forced (new line / match change), or still on last auto value.
+      if (force || !cur.trim() || (prevAuto !== null && cur === prevAuto)) {
+        input.value = next;
+        input.setAttribute("data-auto-label", next);
+      }
+    };
     var syncLineMatch = function (row) {
       var type = row.querySelector(".line-match-type").value;
       ["category", "sku", "item"].forEach(function (kind) {
@@ -190,11 +231,44 @@
         sel.disabled = !on;
       });
     };
-    var wireLine = function (row) {
+    var wireLine = function (row, isNew) {
       var typeSel = row.querySelector(".line-match-type");
+      var labelInput = row.querySelector('input[name="line_label"]');
       if (typeSel) {
-        typeSel.addEventListener("change", function () { syncLineMatch(row); });
+        typeSel.addEventListener("change", function () {
+          syncLineMatch(row);
+          syncLineLabel(row, true);
+        });
         syncLineMatch(row);
+      }
+      ["category", "sku", "item"].forEach(function (kind) {
+        var sel = row.querySelector(".line-match-" + kind);
+        if (!sel) return;
+        sel.addEventListener("change", function () {
+          syncLineLabel(row, true);
+        });
+      });
+      if (labelInput) {
+        if (isNew || !labelInput.value.trim()) {
+          syncLineLabel(row, true);
+        } else {
+          // Editing: treat current label as auto if it already matches Matches.
+          var auto = matchLabelFor(row);
+          labelInput.setAttribute(
+            "data-auto-label",
+            labelInput.value === auto ? auto : "\0"
+          );
+        }
+        labelInput.addEventListener("input", function () {
+          var auto = labelInput.getAttribute("data-auto-label") || "";
+          if (labelInput.value !== auto) {
+            // User customized — stop overwriting until they clear the field.
+            labelInput.setAttribute(
+              "data-auto-label",
+              labelInput.value.trim() ? "\0" : ""
+            );
+          }
+        });
       }
       var rm = row.querySelector(".pkg-line-remove");
       if (rm) {
@@ -204,13 +278,15 @@
         });
       }
     };
-    pkgBody.querySelectorAll(".pkg-line").forEach(wireLine);
+    pkgBody.querySelectorAll(".pkg-line").forEach(function (row) {
+      wireLine(row, false);
+    });
     if (addLineBtn && pkgTpl) {
       addLineBtn.addEventListener("click", function () {
         var node = pkgTpl.content.cloneNode(true);
         var row = node.querySelector("tr");
         pkgBody.appendChild(node);
-        wireLine(row);
+        wireLine(row, true);
       });
       if (!pkgBody.querySelector(".pkg-line")) addLineBtn.click();
     }
@@ -410,11 +486,26 @@
     try { packagesData = JSON.parse(packagesEl.textContent || "[]"); }
     catch (e) { packagesData = []; }
   }
+  // Category labels like "Mouse (Wired)" map to the same SKUs as Match-by-SKU.
+  var accessoryLabelSkus = {};
+  var accessoryLabelEl = document.getElementById("accessory-label-skus");
+  if (accessoryLabelEl) {
+    try { accessoryLabelSkus = JSON.parse(accessoryLabelEl.textContent || "{}"); }
+    catch (e) { accessoryLabelSkus = {}; }
+  }
   var activePackage = null;
 
   function entryMatchesLine(entry, line) {
     if (line.match_type === "category") {
-      return (entry.category || "").toLowerCase() === line.match_value.toLowerCase();
+      var want = (line.match_value || "").toLowerCase();
+      if ((entry.category || "").toLowerCase() === want) return true;
+      if ((entry.name || "").toLowerCase() === want) return true;
+      // Keyboard/Mouse/LAN category lines ≡ accessory SKU lines.
+      var mappedSku = accessoryLabelSkus[want];
+      if (mappedSku && (entry.sku || "").toUpperCase() === String(mappedSku).toUpperCase()) {
+        return true;
+      }
+      return false;
     }
     if (line.match_type === "sku") {
       return (entry.sku || "").toUpperCase() === line.match_value.toUpperCase();

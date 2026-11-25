@@ -50,7 +50,6 @@
               <td>
                 <select class="input line-match-type" name="line_match_type">
                   <option value="category" {{ 'selected' if ln['match_type'] == 'category' }}>Category</option>
-                  <option value="sku" {{ 'selected' if ln['match_type'] == 'sku' }}>KB/MS SKU</option>
                   <option value="item" {{ 'selected' if ln['match_type'] == 'item' }}>Catalog item</option>
                 </select>
               </td>
@@ -64,13 +63,15 @@
                 <select class="input line-match-sku" name="line_match_value"
                         {{ '' if ln['match_type'] == 'sku' else 'hidden disabled' }}>
                   {% for sku, label in accessory_skus.items() %}
-                  <option value="{{ sku }}" {{ 'selected' if ln['match_type'] == 'sku' and ln['match_value'] == sku }}>{{ label }} ({{ sku }})</option>
+                  <option value="{{ sku }}" data-label="{{ label }}"
+                          {{ 'selected' if ln['match_type'] == 'sku' and ln['match_value'] == sku }}>{{ label }} ({{ sku }})</option>
                   {% endfor %}
                 </select>
                 <select class="input line-match-item" name="line_match_value"
                         {{ '' if ln['match_type'] == 'item' else 'hidden disabled' }}>
                   {% for it in items %}
-                  <option value="{{ it['id'] }}" {{ 'selected' if ln['match_type'] == 'item' and ln['match_value'] == it['id']|string }}>
+                  <option value="{{ it['id'] }}" data-label="{{ it['name'] }}"
+                          {{ 'selected' if ln['match_type'] == 'item' and ln['match_value'] == it['id']|string }}>
                     {{ it["name"] }}{% if it["category"] %} · {{ it["category"] }}{% endif %}
                   </option>
                   {% endfor %}
@@ -84,8 +85,10 @@
           </tbody>
         </table>
       </div>
-      <p class="hint">Category matches any scanned unit in that category. KB/MS SKU matches
-        quantity handed out for that accessory. Catalog item matches that exact product.</p>
+      <p class="hint">Label fills from the Matches choice (and updates when you change it).
+        Category for Keyboard/Mouse/LAN uses the same names as Accessory SKU
+        (e.g. Mouse (Wired)) and matches that stock the same way. Other categories
+        match scanned units. Catalog item matches that exact product.</p>
     </div>
 
     <div class="form-actions span-2">
@@ -101,7 +104,7 @@
     <td>
       <select class="input line-match-type" name="line_match_type">
         <option value="category" selected>Category</option>
-        <option value="sku">KB/MS SKU</option>
+        <option value="sku">Accessory SKU</option>
         <option value="item">Catalog item</option>
       </select>
     </td>
@@ -113,12 +116,12 @@
       </select>
       <select class="input line-match-sku" name="line_match_value" hidden disabled>
         {% for sku, label in accessory_skus.items() %}
-        <option value="{{ sku }}">{{ label }} ({{ sku }})</option>
+        <option value="{{ sku }}" data-label="{{ label }}">{{ label }} ({{ sku }})</option>
         {% endfor %}
       </select>
       <select class="input line-match-item" name="line_match_value" hidden disabled>
         {% for it in items %}
-        <option value="{{ it['id'] }}">{{ it["name"] }}{% if it["category"] %} · {{ it["category"] }}{% endif %}</option>
+        <option value="{{ it['id'] }}" data-label="{{ it['name'] }}">{{ it["name"] }}{% if it["category"] %} · {{ it["category"] }}{% endif %}</option>
         {% endfor %}
       </select>
     </td>

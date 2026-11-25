@@ -18,12 +18,54 @@
     </div>
     <dl class="meta">
       <div><dt>Category</dt><dd><span class="chip">{{ item["category"] }}</span></dd></div>
-      <div><dt>Model</dt><dd>{{ item["model"] or '—' }}</dd></div>
+      <div><dt>Model</dt><dd>{{ item["model"] or item["name"] or '—' }}</dd></div>
       {% if item["sku"] %}<div><dt>SKU</dt><dd class="mono">{{ item["sku"] }}</dd></div>{% endif %}
       {% if item["brand"] %}<div><dt>Brand</dt><dd>{{ item["brand"] }}</dd></div>{% endif %}
       {% if item["location"] %}<div><dt>Location</dt><dd>{{ item["location"] }}</dd></div>{% endif %}
       {% if item["notes"] %}<div><dt>Notes</dt><dd>{{ item["notes"] }}</dd></div>{% endif %}
     </dl>
+
+    {% if is_fixed_accessory %}
+    <p class="hint item-edit-locked">Fixed accessory ({{ item["sku"] }}) — category and model are locked.
+      Top up quantity on the <a href="{{ url_for('import_stocks') }}">Import</a> page.</p>
+    {% else %}
+    <form method="post" action="{{ url_for('edit_item', item_id=item['id']) }}" class="item-edit-form" id="item-edit-form">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <div class="card-head" style="padding:0;margin:12px 0 8px">
+        <h2>Edit category &amp; model</h2>
+      </div>
+      <div class="form-grid item-edit-grid">
+        <div class="field">
+          <label for="item-category">Category <span class="req">*</span></label>
+          {% set cat_in_list = item['category'] in categories %}
+          <select class="input" id="item-category" name="category">
+            {% for c in categories %}
+            <option value="{{ c }}" {{ 'selected' if item['category'] == c }}>{{ c }}</option>
+            {% endfor %}
+            <option value="__other__" {{ 'selected' if not cat_in_list }}>Other — type below…</option>
+          </select>
+        </div>
+        <div class="field" id="item-category-other-wrap" {{ '' if not cat_in_list else 'hidden' }}>
+          <label for="item-category-other">Custom category <span class="req">*</span></label>
+          <input class="input" id="item-category-other" name="category_other" maxlength="80"
+                 value="{{ '' if cat_in_list else item['category'] }}"
+                 placeholder="Type a category name" autocomplete="off"
+                 {{ '' if not cat_in_list else 'disabled' }}>
+        </div>
+        <div class="field">
+          <label for="item-model">Model <span class="req">*</span></label>
+          <input class="input" id="item-model" name="model" maxlength="120" required
+                 value="{{ item['model'] or item['name'] }}"
+                 placeholder="e.g. ThinkCentre M70">
+          <p class="hint">Also used as the product name in lists and stock pages.</p>
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-ghost" type="submit">Save category &amp; model</button>
+        </div>
+      </div>
+    </form>
+    {% endif %}
+
     <form method="post" action="{{ url_for('set_min_level', item_id=item["id"]) }}" class="minlevel-form">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <label for="min_quantity">Low-stock warning level</label>
@@ -35,6 +77,33 @@
       <p class="hint">The dashboard alerts you when available stock (untagged + tagged units on
         the shelf) drops to this number or below. 0 turns the alert off.</p>
     </form>
+
+    {% if merge_candidates %}
+    <form method="post" action="{{ url_for('merge_item', item_id=item['id']) }}" class="item-merge-form"
+          data-confirm="Merge the selected product into this one? Its stock, units and history move here, then the duplicate is deleted. This can’t be undone.">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <div class="card-head" style="padding:0;margin:12px 0 8px">
+        <h2>Merge duplicate into this product</h2>
+      </div>
+      <div class="field">
+        <label for="merge-source">Duplicate to absorb</label>
+        <select class="input" id="merge-source" name="source_id" required>
+          <option value="" selected disabled>Choose the typo / duplicate…</option>
+          {% for m in merge_candidates %}
+          <option value="{{ m['id'] }}">
+            {{ m["category"] }} · {{ m["name"] }}{% if m["sku"] %} ({{ m["sku"] }}){% endif %}
+            — {{ m["quantity"] + m["units_in"] }} on hand{% if m["units_out"] %}, {{ m["units_out"] }} out{% endif %}
+          </option>
+          {% endfor %}
+        </select>
+        <p class="hint">Example: keep <em>LAN Cable (5m)</em> open, merge <em>LAN Cable (5 m)</em> into it.
+          This product’s category and model stay; the other row is removed.</p>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-ghost" type="submit">Merge into this product</button>
+      </div>
+    </form>
+    {% endif %}
   </section>
   <div class="stat-col">
     <div class="card stat">

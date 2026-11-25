@@ -720,6 +720,16 @@ def item_detail(item_id):
     if highlight_unit_id is not None:
         if not any(u["id"] == highlight_unit_id for u in units):
             highlight_unit_id = None
+    sku = (item["sku"] or "").upper()
+    merge_candidates = conn.execute(
+        f"""SELECT i.id, i.name, i.category, i.model, i.sku, i.quantity,
+                   {UNITS_IN_SQL} AS units_in, {UNITS_OUT_SQL} AS units_out
+            FROM items i
+            WHERE i.id <> ?
+              AND (i.sku = '' OR UPPER(i.sku) NOT IN ({",".join("?" * len(ACCESSORY_SKUS))}))
+            ORDER BY i.category COLLATE NOCASE, i.name COLLATE NOCASE""",
+        (item_id, *sorted(ACCESSORY_SKUS)),
+    ).fetchall()
     return render_template(
         "item_detail.html",
         item=item,
@@ -727,7 +737,79 @@ def item_detail(item_id):
         units=units,
         history=history,
         highlight_unit_id=highlight_unit_id,
+        categories=_stock_in_categories(conn),
+        is_fixed_accessory=sku in ACCESSORY_SKUS,
+        merge_candidates=merge_candidates,
     )
+
+
+@app.route("/items/<int:item_id>/edit", methods=["POST"])
+def edit_item(item_id):
+    """Update catalog category and model (display name follows model)."""
+    item = get_item_or_404(item_id)
+    sku = (item["sku"] or "").upper()
+    if sku in ACCESSORY_SKUS:
+        flash(
+            f"“{item['name']}” is a fixed accessory ({sku}) — category and model "
+            "can’t be changed. Add stock on the Import page instead.",
+            "error",
+        )
+        return redirect(url_for("item_detail", item_id=item_id))
+
+    category_raw = request.form.get("category", "").strip()
+    if category_raw == "__other__":
+        category_raw = request.form.get("category_other", "").strip()
+    category = _category_for(category_raw) if category_raw else ""
+    model = request.form.get("model", "").strip()
+
+    if not category:
+        flash("Category is required.", "error")
+        return redirect(url_for("item_detail", item_id=item_id))
+    if len(category) > 80:
+        flash("Category must be 80 characters or fewer.", "error")
+        return redirect(url_for("item_detail", item_id=item_id))
+    if not model:
+        flash("Model is required.", "error")
+        return redirect(url_for("item_detail", item_id=item_id))
+    if len(model) > 120:
+        flash("Model must be 120 characters or fewer.", "error")
+        return redirect(url_for("item_detail", item_id=item_id))
+
+    # Fixed accessory categories map to shared SKUs — don't reclassify into those.
+    if _accessory_kind_from_category(category):
+        flash(
+            f"“{category}” is a fixed accessory type. Use Import to add that stock "
+            "instead of reclassifying this product.",
+            "error",
+        )
+        return redirect(url_for("item_detail", item_id=item_id))
+
+    conn = database.get_db()
+    clash = conn.execute(
+        """SELECT id, name FROM items
+           WHERE id <> ?
+             AND category = ? COLLATE NOCASE
+             AND name = ? COLLATE NOCASE""",
+        (item_id, category, model),
+    ).fetchone()
+    if clash is not None:
+        flash(
+            f"Another product already uses category “{category}” and model "
+            f"“{model}”. Pick a different combination.",
+            "error",
+        )
+        return redirect(url_for("item_detail", item_id=item_id))
+
+    # Catalog identity is (category, name); import uses model as the name.
+    conn.execute(
+        """UPDATE items
+           SET category = ?, model = ?, name = ?, updated_at = ?
+           WHERE id = ?""",
+        (category, model, model, now_str(), item_id),
+    )
+    conn.commit()
+    flash(f"Updated to {category} · {model}.", "success")
+    return redirect(url_for("item_detail", item_id=item_id))
 
 
 @app.route("/items/<int:item_id>/min-level", methods=["POST"])
@@ -750,10 +832,140 @@ def set_min_level(item_id):
     return redirect(url_for("item_detail", item_id=item_id))
 
 
+@app.route("/items/<int:item_id>/merge", methods=["POST"])
+def merge_item(item_id):
+    """Merge a duplicate catalog row into this product (typo categories/models).
+
+    Keeps this item’s category / model / SKU. Moves untagged qty, units, and
+    history from the source, updates package item lines, then deletes the source.
+    """
+    target = get_item_or_404(item_id)
+    source_id = form_int(request.form.get("source_id"), default=0)
+    if source_id < 1 or source_id == item_id:
+        flash("Choose a different product to merge into this one.", "error")
+        return redirect(url_for("item_detail", item_id=item_id))
+
+    conn = database.get_db()
+    source = conn.execute("SELECT * FROM items WHERE id = ?", (source_id,)).fetchone()
+    if source is None:
+        flash("That product no longer exists.", "error")
+        return redirect(url_for("item_detail", item_id=item_id))
+
+    src_sku = (source["sku"] or "").upper()
+    tgt_sku = (target["sku"] or "").upper()
+    if src_sku in ACCESSORY_SKUS:
+        flash(
+            f"“{source['name']}” is a fixed accessory ({src_sku}) and can’t be "
+            "merged away. Merge the typo product into the accessory instead.",
+            "error",
+        )
+        return redirect(url_for("item_detail", item_id=item_id))
+    if tgt_sku in ACCESSORY_SKUS and src_sku and src_sku != tgt_sku:
+        flash("Can’t merge a product that has a different SKU into a fixed accessory.", "error")
+        return redirect(url_for("item_detail", item_id=item_id))
+    if src_sku and tgt_sku and src_sku != tgt_sku:
+        flash(
+            f"Both products have SKUs ({src_sku} vs {tgt_sku}) — merge is blocked "
+            "so codes aren’t mixed. Clear one SKU first if they really are the same.",
+            "error",
+        )
+        return redirect(url_for("item_detail", item_id=item_id))
+
+    units_n = conn.execute(
+        "SELECT COUNT(*) AS c FROM units WHERE item_id = ?", (source_id,)
+    ).fetchone()["c"]
+    qty = int(source["quantity"] or 0)
+    now = now_str()
+    try:
+        conn.execute(
+            "UPDATE units SET item_id = ?, updated_at = ? WHERE item_id = ?",
+            (item_id, now, source_id),
+        )
+        conn.execute(
+            "UPDATE transactions SET item_id = ? WHERE item_id = ?",
+            (item_id, source_id),
+        )
+        if qty:
+            conn.execute(
+                "UPDATE items SET quantity = quantity + ?, updated_at = ? WHERE id = ?",
+                (qty, now, item_id),
+            )
+        # Fill blank catalog fields on the keeper from the duplicate.
+        patches = []
+        params = []
+        for col in ("brand", "location", "notes"):
+            if not (target[col] or "").strip() and (source[col] or "").strip():
+                patches.append(f"{col} = ?")
+                params.append(source[col].strip())
+        if not tgt_sku and src_sku:
+            patches.append("sku = ?")
+            params.append(source["sku"])
+        if target["min_quantity"] == 0 and source["min_quantity"]:
+            patches.append("min_quantity = ?")
+            params.append(source["min_quantity"])
+        if patches:
+            params.extend([now, item_id])
+            conn.execute(
+                f"UPDATE items SET {', '.join(patches)}, updated_at = ? WHERE id = ?",
+                params,
+            )
+        else:
+            conn.execute(
+                "UPDATE items SET updated_at = ? WHERE id = ?", (now, item_id)
+            )
+        # Package lines pointing at the duplicate item id.
+        conn.execute(
+            """UPDATE package_lines SET match_value = ?
+               WHERE match_type = 'item' AND match_value = ?""",
+            (str(item_id), str(source_id)),
+        )
+        # Category-based package lines that only referred to the typo category.
+        src_cat = (source["category"] or "").strip()
+        tgt_cat = (target["category"] or "").strip()
+        if src_cat and tgt_cat and src_cat.lower() != tgt_cat.lower():
+            still = conn.execute(
+                """SELECT 1 FROM items
+                   WHERE id <> ? AND category = ? COLLATE NOCASE LIMIT 1""",
+                (source_id, src_cat),
+            ).fetchone()
+            if still is None:
+                conn.execute(
+                    """UPDATE package_lines SET match_value = ?
+                       WHERE match_type = 'category' AND match_value = ? COLLATE NOCASE""",
+                    (tgt_cat, src_cat),
+                )
+        conn.execute("DELETE FROM items WHERE id = ?", (source_id,))
+        conn.commit()
+    except sqlite3.Error:
+        conn.rollback()
+        flash("Could not merge the products. Please try again.", "error")
+        return redirect(url_for("item_detail", item_id=item_id))
+
+    bits = []
+    if qty:
+        bits.append(f"{qty} untagged")
+    if units_n:
+        bits.append(f"{units_n} unit{'s' if units_n != 1 else ''}")
+    moved = ", ".join(bits) if bits else "no stock"
+    flash(
+        f"Merged “{source['category']} · {source['name']}” into this product "
+        f"({moved}). Duplicate removed.",
+        "success",
+    )
+    return redirect(url_for("item_detail", item_id=item_id))
+
+
 @app.route("/items/<int:item_id>/delete", methods=["POST"])
 def delete_item(item_id):
     conn = database.get_db()
     item = get_item_or_404(item_id)
+    sku = (item["sku"] or "").upper()
+    if sku in ACCESSORY_SKUS:
+        flash(
+            f"“{item['name']}” is a fixed accessory ({sku}) and can’t be deleted.",
+            "error",
+        )
+        return redirect(url_for("item_detail", item_id=item_id))
     conn.execute("DELETE FROM items WHERE id = ?", (item_id,))
     conn.commit()
     flash(f"Deleted “{item['name']}” and its transaction history.", "success")
@@ -967,6 +1179,10 @@ ACCESSORY_ITEMS = {
     ("lan_cable", "3m"): ("LAN Cable (3 Metres)", "LAN-3M"),
 }
 ACCESSORY_SKUS = {sku for _name, sku in ACCESSORY_ITEMS.values()}
+# Display label (Mouse (Wired), …) → SKU — package category match uses these.
+ACCESSORY_LABEL_TO_SKU = {
+    name.lower(): sku for name, sku in ACCESSORY_ITEMS.values()
+}
 # Stock-in category labels → the same (kind, variant) keys as ACCESSORY_ITEMS.
 ACCESSORY_CATEGORY_ALIASES = {
     "keyboard (wired)": ("keyboard", "wired"),
@@ -1962,15 +2178,29 @@ def _packages_payload(conn):
 
 
 def _package_form_options(conn):
-    cats = {
-        r["category"]
-        for r in conn.execute(
-            "SELECT DISTINCT category FROM items WHERE category <> ''"
-        ).fetchall()
+    """Category list for package lines — KB/MS/LAN use the same labels as SKUs."""
+    skip = {
+        "keyboard", "mouse", "lan cable",
+        # Accessories are stored under Peripheral + SKU; package category
+        # match uses the SKU labels (Mouse (Wired), …) instead.
+        ACCESSORY_CATEGORY.lower(),
     }
-    for c in (*IMPORT_ITEM_CHOICES, *PRESET_CATEGORIES):
-        if c.lower() not in {"keyboard", "mouse"}:
+    cats = set()
+    for r in conn.execute(
+        "SELECT category, sku, name FROM items WHERE category <> '' OR sku <> ''"
+    ).fetchall():
+        sku = (r["sku"] or "").upper()
+        if sku in ACCESSORY_SKU_LABELS:
+            cats.add(ACCESSORY_SKU_LABELS[sku])
+            continue
+        c = (r["category"] or "").strip()
+        if c and c.lower() not in skip:
             cats.add(c)
+    for c in (*IMPORT_ITEM_CHOICES, *PRESET_CATEGORIES):
+        if c.lower() not in skip:
+            cats.add(c)
+    for label in ACCESSORY_SKU_LABELS.values():
+        cats.add(label)
     categories = sorted(cats, key=lambda s: s.lower())
     items = conn.execute(
         """SELECT id, name, sku, category FROM items
@@ -2011,7 +2241,7 @@ def _parse_package_lines(form):
         if match_type == "sku":
             match_value = match_value.upper()
             if match_value not in ACCESSORY_SKUS:
-                return None, f"SKU “{match_value}” is not a keyboard/mouse SKU."
+                return None, f"SKU “{match_value}” is not an accessory SKU (KB/MS/LAN)."
         elif match_type == "item":
             if form_int(match_value, default=-1) < 1:
                 return None, f"Pick a catalog item for “{label}”."
@@ -2314,6 +2544,7 @@ def _stock_form(tx_type):
         packages=packages,
         categories=categories,
         ticket_no=ticket_no,
+        accessory_label_skus=ACCESSORY_LABEL_TO_SKU,
     )
 
 
