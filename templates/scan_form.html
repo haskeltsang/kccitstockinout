@@ -23,7 +23,8 @@
       <input id="scan-input" class="input scan-input" type="text" autocomplete="off" autofocus
              placeholder="EAM no., S/N or accessory SKU">
       <p class="hint">A barcode scanner works like a keyboard: it types the code and presses Enter.
-        Untagged keyboards and mice move by SKU — type MS-WIRED, MS-WIRELESS, KB-WIRED or KB-WIRELESS.</p>
+        Untagged stock (KB/MS, LAN cable, etc.) can be picked by quantity in the side panel,
+        or type an accessory SKU (MS-WIRED, MS-WIRELESS, KB-WIRED, KB-WIRELESS, LAN-3M).</p>
     </div>
     <div id="scan-status" class="scan-status" role="status" aria-live="polite"></div>
 
@@ -92,7 +93,7 @@
               <option value="" selected disabled>Choose a category…</option>
               {% for c in categories %}
               <option value="{{ c }}"
-                      {% if c in ['Keyboard (Wired)', 'Keyboard (Wireless)', 'Mouse (Wired)', 'Mouse (Wireless)'] %}
+                      {% if c in ['Keyboard (Wired)', 'Keyboard (Wireless)', 'Mouse (Wired)', 'Mouse (Wireless)', 'LAN Cable (3 Metres)'] %}
                       data-accessory="1"
                       {% endif %}>{{ c }}</option>
               {% endfor %}
@@ -138,7 +139,7 @@
         {% if not packages %}
         <p class="hint">No packages yet — create kits on the <a href="{{ url_for('packages') }}">Packages</a> page.</p>
         {% else %}
-        <p class="hint">Pick a kit to tick off required items as you scan. Finish still works if the list is incomplete.</p>
+        <p class="hint">Pick a kit to tick off required items as you scan. Required counts scale with the first line (e.g. 3 OA PCs → 3× each accessory). Finish still works if the list is incomplete.</p>
         {% endif %}
       </div>
       <ul class="pkg-checklist" id="package-checklist" hidden></ul>
@@ -147,24 +148,50 @@
     <script type="application/json" id="packages-data">{{ packages | tojson }}</script>
 
     <section class="card accessory-out">
-      <span class="scan-opt-label">Keyboards &amp; mice — quantity to hand out</span>
-        {% for sku in ["MS-WIRED", "MS-WIRELESS", "KB-WIRED", "KB-WIRELESS"] %}
-        {% set it = items_by_sku.get(sku) %}
-        <div class="acc-row">
-          <label class="acc-name" for="acc-{{ sku|lower }}">{{ it["name"] if it else sku }}</label>
-          <span class="muted small">{{ it["quantity"] if it else 0 }} on hand</span>
-          <input class="input acc-qty" id="acc-{{ sku|lower }}" type="number"
-                 min="0" max="{{ it["quantity"] if it else 0 }}" step="1" placeholder="0"
-                 data-item-id="{{ it["id"] if it else "" }}"
-                 data-name="{{ it["name"] if it else "" }}"
-                 data-sku="{{ sku }}"
-                 data-category="{{ it['category'] if it else 'Peripheral' }}"
-                 data-qty="{{ it["quantity"] if it else 0 }}"
-                 {{ 'disabled' if not it or it["quantity"] == 0 }}>
+      <span class="scan-opt-label">Untagged items — quantity to hand out</span>
+      <div class="untagged-out-pick">
+        <div class="field">
+          <label for="untagged-out-select">Product</label>
+          <select class="input" id="untagged-out-select">
+            <option value="" selected disabled>Choose an untagged product…</option>
+            {% for it in untagged_items %}
+            <option value="{{ it['id'] }}"
+                    data-name="{{ it['name'] }}"
+                    data-sku="{{ it['sku'] or '' }}"
+                    data-category="{{ it['category'] or '' }}"
+                    data-qty="{{ it['quantity'] }}">
+              {{ it["name"] }}{% if it["category"] %} · {{ it["category"] }}{% endif %}{% if it["sku"] %} ({{ it["sku"] }}){% endif %}
+              — {{ it["quantity"] }} on hand
+            </option>
+            {% endfor %}
+          </select>
         </div>
+        <div class="field">
+          <label for="untagged-out-qty">Quantity</label>
+          <input class="input" id="untagged-out-qty" type="number" min="1" max="10000" step="1" value="1">
+        </div>
+        <button type="button" class="btn btn-primary" id="untagged-out-add"
+                {{ 'disabled' if not untagged_items }}>Add</button>
+      </div>
+      {% if not untagged_items %}
+      <p class="hint">No untagged stock on the shelf. Import Tagged=No rows or add keyboards/mice on Import.</p>
+      {% else %}
+      <p class="hint">Pick any untagged product (keyboard, mouse, LAN cable, etc.) and a quantity.
+        Scanning an OA PC / desktop PC still auto-adds 1 wired keyboard, 1 wired mouse,
+        and 1 × 3m LAN cable per PC.</p>
+      {% endif %}
+      {# Metadata for OA PC auto KB/MS/LAN — not shown as fixed qty boxes anymore. #}
+      <div id="accessory-sku-data" hidden aria-hidden="true">
+        {% for sku in ["MS-WIRED", "MS-WIRELESS", "KB-WIRED", "KB-WIRELESS", "LAN-3M"] %}
+        {% set it = items_by_sku.get(sku) %}
+        <span class="acc-sku-meta"
+              data-sku="{{ sku }}"
+              data-item-id="{{ it['id'] if it else '' }}"
+              data-name="{{ it['name'] if it else sku }}"
+              data-category="{{ it['category'] if it else 'Peripheral' }}"
+              data-qty="{{ it['quantity'] if it else 0 }}"></span>
         {% endfor %}
-        <p class="hint">Scanning an OA PC / desktop PC auto-adds 1 wired keyboard and
-          1 wired mouse per PC. Top up stock on the Import page.</p>
+      </div>
     </section>
   </div>
   {% endif %}
@@ -239,10 +266,11 @@
         </datalist>
       </div>
       {% endif %}
-      <div class="field{{ ' loan-req' if not is_in }}">
-        <label for="reference">{{ 'PO / delivery order no.' if is_in else 'Ticket / request no.' }}</label>
-        <input class="input mono" id="reference" name="reference" maxlength="60"
-               placeholder="{{ 'PO-2026-…' if is_in else 'HD-…' }}">
+      <div class="field">
+        <label for="ticket_no">Ticket / request no.</label>
+        <input class="input mono input-locked" id="ticket_no" name="ticket_no" value="{{ ticket_no }}"
+               readonly tabindex="-1" title="Auto-assigned when you finish this batch">
+        <p class="hint muted">Auto-generated (KCCITD-YYYYMMDD-nnn-{{ 'IN' if is_in else 'OUT' }}). Locked — saved as a case when you finish.</p>
       </div>
       <div class="field">
         <label for="notes">Notes</label>
@@ -262,21 +290,24 @@
 
 <noscript>
 <div class="card form-card" style="margin-top:14px">
-  <div class="card-head"><h2>Record keyboard / mouse stock (JavaScript is off)</h2></div>
+  <div class="card-head"><h2>Record untagged stock (JavaScript is off)</h2></div>
   <form method="post" class="form-grid">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <input type="hidden" name="rtype" value="bulk">
     <input type="hidden" name="rserial" value="">
     <input type="hidden" name="ream" value="">
     <div class="field span-2">
-      <label for="ns-item">Item <span class="req">*</span></label>
+      <label for="ns-item">Untagged item <span class="req">*</span></label>
       <select class="input" id="ns-item" name="rref" required>
-        {% for sku in ["MS-WIRED", "MS-WIRELESS", "KB-WIRED", "KB-WIRELESS"] %}
-        {% set it = items_by_sku.get(sku) %}
-        <option value="{{ it["id"] if it else "" }}" {{ 'disabled' if not it or (not is_in and it["quantity"] == 0) }}>
-          {{ it["name"] if it else sku + " — not added yet (use Import)" }}{% if it %} — {{ it["quantity"] }} on hand{% endif %}
+        {% if untagged_items %}
+        {% for it in untagged_items %}
+        <option value="{{ it['id'] }}">
+          {{ it["name"] }}{% if it["sku"] %} ({{ it["sku"] }}){% endif %} — {{ it["quantity"] }} on hand
         </option>
         {% endfor %}
+        {% else %}
+        <option value="" disabled selected>No untagged stock on hand</option>
+        {% endif %}
       </select>
     </div>
     <div class="field">
@@ -307,8 +338,9 @@
     </div>
     {% endif %}
     <div class="field">
-      <label for="ns-reference">{{ 'PO / delivery order no.' if is_in else 'Ticket / request no.' }}</label>
-      <input class="input mono" id="ns-reference" name="reference" maxlength="60">
+      <label for="ns-ticket_no">Ticket / request no.</label>
+      <input class="input mono input-locked" id="ns-ticket_no" name="ticket_no" value="{{ ticket_no }}"
+             readonly tabindex="-1" title="Auto-assigned when you finish this batch">
     </div>
     <div class="field span-2">
       <label for="ns-notes">Notes</label>

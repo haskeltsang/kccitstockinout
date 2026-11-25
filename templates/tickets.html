@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Tickets{% endblock %}
+{% block heading %}Stock tickets{% endblock %}
+{% block content %}
+<form class="toolbar" method="get" action="{{ url_for('tickets') }}">
+  <div class="search">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m15.5 15.5 4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+    <input class="input" type="search" name="q" value="{{ q }}" placeholder="Search ticket no., person, department, notes…">
+  </div>
+  <select class="input" name="type">
+    <option value="" {{ 'selected' if not tx_type }}>All types</option>
+    <option value="IN" {{ 'selected' if tx_type == 'IN' }}>Stock in</option>
+    <option value="OUT" {{ 'selected' if tx_type == 'OUT' }}>Stock out</option>
+  </select>
+  <button class="btn btn-ghost" type="submit">Filter</button>
+  {% if q or tx_type %}<a class="btn btn-link" href="{{ url_for('tickets') }}">Reset</a>{% endif %}
+</form>
+
+{% if rows %}
+<div class="card table-card">
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Ticket</th><th>Date</th><th>Type</th><th>Person</th><th>Department</th>
+        <th class="num">Lines</th><th class="num">Units</th><th>By</th><th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for t in rows %}
+      <tr>
+        <td class="mono"><a class="item-name" href="{{ url_for('ticket_detail', ticket_id=t['id']) }}">{{ t["ticket_no"] }}</a></td>
+        <td class="nowrap">{{ t["created_at"] }}</td>
+        <td>
+          <span class="pill {{ 'pill-in' if t['type'] == 'IN' else 'pill-out' }}">{{ 'In' if t['type'] == 'IN' else 'Out' }}</span>
+          {% if t["on_loan"] %}<span class="pill pill-loan">On loan</span>{% endif %}
+          {% if t["condemned"] %}<span class="pill pill-condemn">Condemned</span>{% endif %}
+          {% if t["follow_up"] %}<span class="pill pill-followup">Follow up</span>{% endif %}
+        </td>
+        <td>{{ t["person"] or '—' }}</td>
+        <td>{{ t["department"] or '—' }}</td>
+        <td class="num">{{ t["line_count"] }}</td>
+        <td class="num">{{ t["unit_count"] }}</td>
+        <td class="muted">{{ t["created_by"] or '—' }}</td>
+        <td><a class="btn btn-sm btn-ghost" href="{{ url_for('ticket_detail', ticket_id=t['id']) }}">View</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<div class="pagination">
+  <span class="muted small">{{ total }} ticket{{ 's' if total != 1 }} · page {{ page }} of {{ pages }}</span>
+  <div class="page-btns">
+    {% if page > 1 %}
+    <a class="btn btn-sm btn-ghost" href="{{ url_for('tickets', q=q, type=tx_type, page=page - 1) }}">&larr; Prev</a>
+    {% endif %}
+    {% if page < pages %}
+    <a class="btn btn-sm btn-ghost" href="{{ url_for('tickets', q=q, type=tx_type, page=page + 1) }}">Next &rarr;</a>
+    {% endif %}
+  </div>
+</div>
+{% else %}
+<div class="card empty">
+  <h2>No tickets yet</h2>
+  {% if q or tx_type %}
+  <p class="muted">Nothing matches these filters.</p>
+  <a class="btn btn-ghost" href="{{ url_for('tickets') }}">Clear filters</a>
+  {% else %}
+  <p class="muted">Each stock in/out batch gets a ticket number (KCCITD-…) and appears here as a case.</p>
+  <a class="btn btn-primary" href="{{ url_for('stock_in') }}">Record stock in</a>
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}

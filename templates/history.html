@@ -41,7 +41,7 @@
         <td class="num"><span class="{{ 'qty-in' if t["type"] == 'IN' else 'qty-out' }}">{{ '+' if t["type"] == 'IN' else '−' }}{{ t["quantity"] }}</span></td>
         <td>{{ t["person"] or '—' }}</td>
         <td>{{ t["department"] or '—' }}</td>
-        <td class="mono">{{ t["reference"] or '—' }}</td>
+        <td class="mono">{% if t["reference"] and t["reference"].startswith("KCCITD-") %}<a class="item-name" href="{{ url_for('ticket_by_no', ticket_no=t['reference']) }}">{{ t["reference"] }}</a>{% else %}{{ t["reference"] or '—' }}{% endif %}</td>
         <td>{{ t["site"] or '—' }}</td>
         <td class="mono">{{ t["staff_id"] or '—' }}</td>
         <td class="muted">{{ t["notes"] or '—' }}</td>

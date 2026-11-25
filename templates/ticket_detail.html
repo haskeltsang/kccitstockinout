@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}{{ ticket["ticket_no"] }}{% endblock %}
+{% block heading %}{{ ticket["ticket_no"] }}{% endblock %}
+{% block actions %}
+  <a class="btn btn-ghost" href="{{ url_for('tickets') }}">All tickets</a>
+{% endblock %}
+{% block content %}
+<div class="detail-grid">
+  <section class="card">
+    <div class="card-head">
+      <h2>Case details</h2>
+      <span class="pill {{ 'pill-in' if ticket['type'] == 'IN' else 'pill-out' }}">{{ 'Stock in' if ticket['type'] == 'IN' else 'Stock out' }}</span>
+      {% if ticket["on_loan"] %}<span class="pill pill-loan">On loan</span>{% endif %}
+      {% if ticket["condemned"] %}<span class="pill pill-condemn">Condemned</span>{% endif %}
+      {% if ticket["follow_up"] %}<span class="pill pill-followup">Follow up</span>{% endif %}
+    </div>
+    <dl class="meta">
+      <div><dt>Ticket no.</dt><dd class="mono">{{ ticket["ticket_no"] }}</dd></div>
+      <div><dt>Recorded</dt><dd>{{ ticket["created_at"] }}</dd></div>
+      <div><dt>Recorded by</dt><dd>{{ ticket["created_by"] or '—' }}</dd></div>
+      <div><dt>{{ 'Supplier / source' if ticket['type'] == 'IN' else 'Custodian' }}</dt><dd>{{ ticket["person"] or '—' }}</dd></div>
+      {% if ticket["type"] == "OUT" %}
+      <div><dt>Department</dt><dd>{{ ticket["department"] or '—' }}</dd></div>
+      <div><dt>Staff ID</dt><dd class="mono">{{ ticket["staff_id"] or '—' }}</dd></div>
+      {% endif %}
+      <div><dt>Site</dt><dd>{{ ticket["site"] or '—' }}</dd></div>
+      {% if ticket["notes"] %}<div><dt>Notes</dt><dd>{{ ticket["notes"] }}</dd></div>{% endif %}
+    </dl>
+  </section>
+  <div class="stat-col">
+    <div class="card stat">
+      <span class="stat-label">Line items</span>
+      <span class="stat-value">{{ lines|length }}</span>
+      <span class="stat-sub">products on this ticket</span>
+    </div>
+    <div class="card stat">
+      <span class="stat-label">Units moved</span>
+      <span class="stat-value">{{ unit_total }}</span>
+      <span class="stat-sub">{{ 'into' if ticket['type'] == 'IN' else 'out of' }} stock</span>
+    </div>
+  </div>
+</div>
+
+<section class="card table-card">
+  <div class="card-head">
+    <h2>Items on this ticket</h2>
+  </div>
+  {% if lines %}
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Item</th><th>SKU</th><th>Asset/EAM</th><th>S/N</th><th class="num">Qty</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for line in lines %}
+      <tr>
+        <td><a class="item-name" href="{{ url_for('item_detail', item_id=line['item_id']) }}">{{ line["item_name"] }}</a></td>
+        <td class="mono">{{ line["item_sku"] or '—' }}</td>
+        <td class="mono">{{ line["unit_eam"] or '—' }}</td>
+        <td class="mono">{{ line["unit_serial"] or '—' }}</td>
+        <td class="num"><span class="{{ 'qty-in' if ticket['type'] == 'IN' else 'qty-out' }}">{{ '+' if ticket['type'] == 'IN' else '−' }}{{ line["quantity"] }}</span></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted pad">No line items linked to this ticket.</p>
+  {% endif %}
+</section>
+{% endblock %}

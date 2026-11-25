@@ -41,6 +41,42 @@
       inp.addEventListener("change", syncImportPanels);
     });
     syncImportPanels();
+
+    // LAN cable has a fixed 3m variant — hide wired/wireless and submit connection=3m.
+    var accType = document.getElementById("accessory-type");
+    var connSelect = document.getElementById("connection");
+    var connLan = document.getElementById("connection-lan");
+    var connField = document.getElementById("connection-field");
+    function syncAccessoryConnection() {
+      if (!accType || !connSelect) return;
+      var isLan = accType.value === "lan_cable";
+      connSelect.disabled = isLan;
+      connSelect.hidden = isLan;
+      if (connLan) connLan.disabled = !isLan;
+      var label = connField ? connField.querySelector("label") : null;
+      if (label) {
+        label.innerHTML = isLan
+          ? 'Length <span class="req">*</span>'
+          : 'Connection <span class="req">*</span>';
+      }
+      var cue = document.getElementById("lan-length-cue");
+      if (isLan) {
+        if (!cue && connField) {
+          cue = document.createElement("p");
+          cue.id = "lan-length-cue";
+          cue.className = "hint";
+          cue.textContent = "Fixed standard: 3 Metres (SKU LAN-3M).";
+          connField.appendChild(cue);
+        }
+        if (cue) cue.hidden = false;
+      } else if (cue) {
+        cue.hidden = true;
+      }
+    }
+    if (accType) {
+      accType.addEventListener("change", syncAccessoryConnection);
+      syncAccessoryConnection();
+    }
   }
 
   // ---- Nav quick-find: keep focus ready for a barcode scanner ------------
@@ -236,10 +272,10 @@
     }
     if (regNewHint) {
       regNewHint.textContent = isAcc
-        ? "Keyboard/Mouse wired or wireless maps to the shared stock SKU in the database. Use N/A + quantity to stock in. Brand is optional."
+        ? "Keyboard/Mouse/LAN Cable maps to the shared stock SKU in the database. Use N/A + quantity to stock in. Brand is optional."
         : "Only needed for a new product. Creates it in the catalog (or reuses the same name + category), then registers scanned units under it.";
     }
-    // KB/MS are quantity stock — nudge the code mode to N/A.
+    // Fixed accessories are quantity stock — nudge the code mode to N/A.
     if (isAcc && modeToggle && scanMode !== "na") {
       modeToggle.querySelectorAll(".mode-btn").forEach(function (btn) {
         var on = btn.getAttribute("data-mode") === "na";
@@ -287,14 +323,17 @@
     newItemCategory.addEventListener("change", syncCategoryOther);
     syncCategoryOther();
   }
-  // A loan always needs a custodian, department and ticket number.
-  var loanInputs = ["person", "department", "reference"].map(function (id) {
+  // A loan always needs a custodian and department (ticket is auto-assigned).
+  var loanInputs = ["person", "department"].map(function (id) {
     return document.getElementById(id);
   });
-  var accQtyInputs = [];
-  document.querySelectorAll(".acc-qty").forEach(function (inp) {
-    accQtyInputs.push(inp);
+  var accSkuMetas = [];
+  document.querySelectorAll(".acc-sku-meta").forEach(function (el) {
+    accSkuMetas.push(el);
   });
+  var untaggedOutSelect = document.getElementById("untagged-out-select");
+  var untaggedOutQty = document.getElementById("untagged-out-qty");
+  var untaggedOutAdd = document.getElementById("untagged-out-add");
 
   // Entries: {kind:'unit', unitId, name, code}
   //          {kind:'new', itemId, name, serial, eam}
@@ -395,6 +434,22 @@
     return n;
   }
 
+  function lineQty(line) {
+    var q = parseInt(line && line.quantity, 10);
+    return q > 0 ? q : 1;
+  }
+
+  // Scale every line by how many kits the first (primary) line implies —
+  // e.g. 3 × OA PC in the batch → KB/MS/LAN denominators become ×3.
+  function packageKitCount() {
+    if (!activePackage || !activePackage.lines.length) return 1;
+    var anchor = activePackage.lines[0];
+    var perKit = lineQty(anchor);
+    var have = countForLine(anchor);
+    if (have < 1) return 1;
+    return Math.max(1, Math.ceil(have / perKit));
+  }
+
   function updatePackageChecklist() {
     if (!packageChecklist || !packageSelect) return;
     if (!activePackage || !activePackage.lines.length) {
@@ -408,10 +463,11 @@
     }
     packageChecklist.hidden = false;
     packageChecklist.innerHTML = "";
+    var kits = packageKitCount();
     var done = 0;
     activePackage.lines.forEach(function (line) {
       var have = countForLine(line);
-      var need = line.quantity;
+      var need = lineQty(line) * kits;
       var li = el("li", "pkg-check-item");
       if (have >= need) {
         li.className += " done";
@@ -429,8 +485,10 @@
     });
     if (packageProgress) {
       packageProgress.hidden = false;
+      var kitNote = kits > 1 ? " · " + kits + " kits" : "";
       packageProgress.textContent = done + " of " + activePackage.lines.length +
-        " checklist item" + (activePackage.lines.length === 1 ? "" : "s") + " complete";
+        " checklist item" + (activePackage.lines.length === 1 ? "" : "s") +
+        " complete" + kitNote;
     }
   }
 
@@ -479,7 +537,7 @@
     }
   }
 
-  // OA PC / desktop PC stock-outs bring a matching set of wired KB + MS.
+  // OA PC / desktop PC stock-outs bring wired KB + MS + 3m LAN cable.
   function isOaPcCategory(cat) {
     var c = (cat || "").toLowerCase().replace(/\s+/g, " ").trim();
     if (!c) return false;
@@ -497,11 +555,11 @@
     return n;
   }
 
-  function accInputForSku(sku) {
+  function accMetaForSku(sku) {
     var found = null;
     var want = (sku || "").toUpperCase();
-    accQtyInputs.forEach(function (inp) {
-      if ((inp.getAttribute("data-sku") || "").toUpperCase() === want) found = inp;
+    accSkuMetas.forEach(function (el) {
+      if ((el.getAttribute("data-sku") || "").toUpperCase() === want) found = el;
     });
     return found;
   }
@@ -510,17 +568,17 @@
     if (!isOut) return;
     var n = countOaPcs();
     var short = [];
-    ["KB-WIRED", "MS-WIRED"].forEach(function (sku) {
-      var inp = accInputForSku(sku);
-      if (!inp) return;
-      var itemId = parseInt(inp.getAttribute("data-item-id"), 10);
+    ["KB-WIRED", "MS-WIRED", "LAN-3M"].forEach(function (sku) {
+      var meta = accMetaForSku(sku);
+      if (!meta) return;
+      var itemId = parseInt(meta.getAttribute("data-item-id"), 10);
       if (!itemId) {
         if (n > 0) short.push(sku);
         return;
       }
-      var name = inp.getAttribute("data-name") || sku;
-      var category = inp.getAttribute("data-category") || "";
-      var stock = parseInt(inp.getAttribute("data-qty"), 10) || 0;
+      var name = meta.getAttribute("data-name") || sku;
+      var category = meta.getAttribute("data-category") || "";
+      var stock = parseInt(meta.getAttribute("data-qty"), 10) || 0;
       var want = Math.min(n, stock);
       if (n > stock) short.push(sku + " (need " + n + ", have " + stock + ")");
 
@@ -572,6 +630,61 @@
     if (n > 0 && short.length) {
       setStatus("OA PC kit needs more stock: " + short.join(", "), false);
     }
+  }
+
+  function addUntaggedOut() {
+    if (!untaggedOutSelect || !isOut) return;
+    var opt = untaggedOutSelect.options[untaggedOutSelect.selectedIndex];
+    var itemId = parseInt(untaggedOutSelect.value, 10);
+    if (!itemId || !opt || opt.disabled) {
+      setStatus("Choose an untagged product first.", false);
+      beep(false);
+      return;
+    }
+    var name = opt.getAttribute("data-name") || opt.textContent;
+    var sku = opt.getAttribute("data-sku") || "";
+    var category = opt.getAttribute("data-category") || "";
+    var stock = parseInt(opt.getAttribute("data-qty"), 10) || 0;
+    var qty = untaggedOutQty ? parseInt(untaggedOutQty.value, 10) : 1;
+    if (isNaN(qty) || qty < 1) qty = 1;
+    if (stock < 1) {
+      setStatus("No untagged × " + name + " on the shelf.", false);
+      beep(false);
+      return;
+    }
+    var existing = null;
+    entries.forEach(function (e) {
+      if (e.kind === "bulk" && e.itemId === itemId) existing = e;
+    });
+    var next = (existing ? existing.count : 0) + qty;
+    if (next > stock) {
+      if (existing) {
+        existing.count = stock;
+        existing.autoOaPc = false;
+      } else if (stock > 0) {
+        entries.push({
+          kind: "bulk", itemId: itemId, name: name, sku: sku,
+          category: category, stock: stock, count: stock, autoOaPc: false,
+        });
+      }
+      setStatus("Only " + stock + " × " + name + " on the shelf.", false);
+      beep(false);
+    } else if (existing) {
+      existing.count = next;
+      existing.stock = stock;
+      existing.autoOaPc = false;
+      setStatus("Added: " + name + " (×" + existing.count + ")", true);
+      beep(true);
+    } else {
+      entries.push({
+        kind: "bulk", itemId: itemId, name: name, sku: sku,
+        category: category, stock: stock, count: qty, autoOaPc: false,
+      });
+      setStatus("Added: " + name + " (×" + qty + ")", true);
+      beep(true);
+    }
+    if (untaggedOutQty) untaggedOutQty.value = "1";
+    render();
   }
 
   function render() {
@@ -698,15 +811,6 @@
         hidden("rserial", "");
         hidden("ream", "");
       }
-    });
-
-    accQtyInputs.forEach(function (inp) {
-      var itemId = inp.getAttribute("data-item-id");
-      var match = null;
-      entries.forEach(function (e) {
-        if (e.kind === "bulk" && String(e.itemId) === itemId) match = e;
-      });
-      inp.value = match ? String(match.count) : "";
     });
 
     emptyEl.style.display = entries.length ? "none" : "";
@@ -877,7 +981,7 @@
     } else {
       setStatus(
         isOut
-          ? ("Added: " + msg + (oaKit ? " — wired KB + MS added for OA PC" : ""))
+          ? ("Added: " + msg + (oaKit ? " — wired KB + MS + 3m LAN added for OA PC" : ""))
           : ("Return: " + msg + (unit.holder ? " — was with " + unit.holder : "") +
             (unit.on_loan ? " · on loan" : "")),
         true
@@ -1218,44 +1322,30 @@
     });
   });
 
-  accQtyInputs.forEach(function (inp) {
-    inp.addEventListener("input", function () {
-      var itemId = parseInt(inp.getAttribute("data-item-id"), 10);
-      if (!itemId) return;
-      var name = inp.getAttribute("data-name");
-      var sku = inp.getAttribute("data-sku") || "";
-      var category = inp.getAttribute("data-category") || "";
-      var stock = parseInt(inp.getAttribute("data-qty"), 10) || 0;
-      var qty = parseInt(inp.value, 10);
-      if (isNaN(qty) || qty < 0) qty = 0;
-      var existing = null;
-      entries.forEach(function (e) {
-        if (e.kind === "bulk" && e.itemId === itemId) existing = e;
-      });
-      if (qty === 0) {
-        if (existing) entries.splice(entries.indexOf(existing), 1);
-        setStatus("", true);
-      } else if (qty > stock) {
-        if (existing) {
-          existing.count = stock;
-          existing.autoOaPc = false;
-        } else {
-          entries.push({ kind: "bulk", itemId: itemId, name: name, sku: sku, category: category, stock: stock, count: stock, autoOaPc: false });
-        }
-        setStatus("Only " + stock + " × " + name + " on the shelf.", false);
-        beep(false);
-      } else {
-        if (existing) {
-          existing.count = qty;
-          existing.autoOaPc = false;
-        } else {
-          entries.push({ kind: "bulk", itemId: itemId, name: name, sku: sku, category: category, stock: stock, count: qty, autoOaPc: false });
-        }
-        setStatus("Added: " + name + " (×" + qty + ")", true);
-      }
-      render();
+  if (untaggedOutAdd) {
+    untaggedOutAdd.addEventListener("click", function () {
+      addUntaggedOut();
     });
-  });
+  }
+  if (untaggedOutQty) {
+    untaggedOutQty.addEventListener("keydown", function (event) {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      addUntaggedOut();
+    });
+  }
+  if (untaggedOutSelect) {
+    untaggedOutSelect.addEventListener("change", function () {
+      var opt = untaggedOutSelect.options[untaggedOutSelect.selectedIndex];
+      var stock = opt ? parseInt(opt.getAttribute("data-qty"), 10) || 0 : 0;
+      if (untaggedOutQty && stock > 0) {
+        untaggedOutQty.max = String(stock);
+        if (parseInt(untaggedOutQty.value, 10) > stock) {
+          untaggedOutQty.value = String(stock);
+        }
+      }
+    });
+  }
 
   clearBtn.addEventListener("click", function () {
     entries = [];

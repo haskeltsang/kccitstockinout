@@ -389,6 +389,17 @@ a.shelf-stat .stat-sub {
   outline-offset: 0;
   border-color: var(--brand);
 }
+.input.input-locked,
+.input[readonly].input-locked {
+  background: #eef0f4;
+  color: var(--muted);
+  cursor: not-allowed;
+  user-select: all;
+}
+.input.input-locked:focus {
+  outline: none;
+  border-color: var(--line);
+}
 select.input { appearance: auto; }
 textarea.input { resize: vertical; }
 
@@ -583,10 +594,16 @@ textarea.input { resize: vertical; }
   gap: 8px;
   align-content: start;
 }
-.acc-row { display: flex; align-items: center; gap: 10px; }
-.acc-row .acc-name { flex: 1; margin: 0; }
-.acc-qty { width: 84px; text-align: right; }
-.acc-qty:disabled { opacity: 0.5; }
+.untagged-out-pick {
+  display: grid;
+  grid-template-columns: 1fr 88px auto;
+  gap: 10px;
+  align-items: end;
+}
+.untagged-out-pick .field { margin: 0; }
+@media (max-width: 720px) {
+  .untagged-out-pick { grid-template-columns: 1fr; }
+}
 
 .minlevel-form {
   margin-top: 12px;

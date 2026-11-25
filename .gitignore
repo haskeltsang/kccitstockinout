@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# App data (created at first run)
+stock.db
+.secret_key
+
+# OS
+.DS_Store
+Thumbs.db

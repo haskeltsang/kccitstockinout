@@ -10,7 +10,7 @@
   <div class="import-mode" role="radiogroup" aria-label="What are you adding?">
     <label class="import-mode-opt">
       <input type="radio" name="import_mode" value="accessory" checked>
-      <span>Mouse / Keyboard</span>
+      <span>Mouse / Keyboard / LAN cable</span>
     </label>
     <label class="import-mode-opt">
       <input type="radio" name="import_mode" value="excel">
@@ -20,7 +20,7 @@
 </div>
 
 <div class="card form-card" id="accessory-panel">
-  <div class="card-head"><h2>Add keyboards or mice by quantity</h2></div>
+  <div class="card-head"><h2>Add accessories by quantity</h2></div>
   <form method="post" class="form-grid">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <input type="hidden" name="mode" value="accessory">
@@ -29,14 +29,16 @@
       <select class="input" id="accessory-type" name="accessory_type">
         <option value="mouse" selected>Mouse</option>
         <option value="keyboard">Keyboard</option>
+        <option value="lan_cable">LAN Cable (3 Metres)</option>
       </select>
     </div>
-    <div class="field">
+    <div class="field" id="connection-field">
       <label for="connection">Connection <span class="req">*</span></label>
       <select class="input" id="connection" name="connection">
         <option value="wired" selected>Wired</option>
         <option value="wireless">Wireless</option>
       </select>
+      <input type="hidden" id="connection-lan" name="connection" value="3m" disabled>
     </div>
     <div class="field">
       <label for="qty">Quantity to add <span class="req">*</span></label>
@@ -56,9 +58,10 @@
     <div class="field span-2">
       <label for="acc-notes">Notes (optional)</label>
       <input class="input" id="acc-notes" name="notes" maxlength="500" placeholder="e.g. received from IT supplier">
-      <p class="hint">Each type is one item — Mouse (Wired), Mouse (Wireless), Keyboard (Wired),
-        Keyboard (Wireless) — created the first time you add it. On the Stock In / Out pages,
-        move them by typing their SKU: MS-WIRED, MS-WIRELESS, KB-WIRED or KB-WIRELESS.</p>
+      <p class="hint">Each type is one item — Mouse (Wired/Wireless), Keyboard (Wired/Wireless),
+        LAN Cable (3 Metres) — created the first time you add it. On Stock In / Out, move them
+        by SKU: MS-WIRED, MS-WIRELESS, KB-WIRED, KB-WIRELESS, or LAN-3M.
+        OA PC kits include 1 wired KB + 1 wired MS + 1 × 3m LAN cable.</p>
     </div>
     <div class="form-actions span-2">
       <button class="btn btn-primary" type="submit">Add to stock</button>
@@ -83,16 +86,13 @@
       <input class="input" id="file" name="file" type="file" accept=".xlsx,.csv" required>
       <p class="hint">
         Header row columns:
-        <strong>Item</strong>, <strong>Model</strong>, <strong>S/N</strong>,
-        <strong>Asset/EAM No.</strong>, <strong>Quantity</strong>
+        <strong>Item</strong>, <strong>Model</strong>, <strong>Tagged</strong> (Yes/No),
+        <strong>S/N</strong>, <strong>Asset/EAM No.</strong>, <strong>Quantity</strong>
         (plus optional Brand, Funding, Project, Project Code, Site).
-        <strong>Item</strong> — pick <em>PC</em>, <em>Laptop</em>, <em>Monitor</em>,
-        <em>iPad</em>, or type your own; use <em>Keyboard</em> / <em>Mouse</em> for
-        untagged stock (add “Wireless” in Item or Model if needed).
-        <strong>Tagged items</strong> need Model and at least one of S/N or EAM —
-        leave <strong>Quantity</strong> blank (a quantity on these rows is rejected).
-        <strong>Keyboard / Mouse</strong> need only <strong>Quantity</strong>
-        (other unit fields are ignored). Site blank means Site B.
+        <strong>Tagged = Yes</strong> — Model plus S/N and/or EAM; leave Quantity blank.
+        <strong>Tagged = No</strong> — Quantity only; leave S/N and EAM blank.
+        If that product already has tagged units in the database, a Tagged=No row is rejected.
+        Keyboard / Mouse default to untagged when Tagged is blank. Site blank means Site B.
         Format code columns as <em>Text</em> in Excel so leading zeros are kept.
       </p>
     </div>
@@ -127,6 +127,7 @@
         <th class="num">Row</th>
         <th>Item</th>
         <th>Model</th>
+        <th>Tagged</th>
         <th>S/N</th>
         <th>Asset/EAM No.</th>
         <th class="num">Quantity</th>
@@ -145,6 +146,7 @@
         <td class="num muted">{{ e["row"] }}</td>
         <td>{{ e["item"] or '—' }}</td>
         <td>{{ e["model"] or '—' }}</td>
+        <td>{{ e["tagged"] or '—' }}</td>
         <td class="mono">{{ e["serial"] or '—' }}</td>
         <td class="mono">{{ e["eam"] or '—' }}</td>
         <td class="num">{{ e["quantity"] or '—' }}</td>

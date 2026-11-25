@@ -116,6 +116,26 @@ CREATE TABLE IF NOT EXISTS package_lines (
     sort_order  INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_package_lines_pkg ON package_lines (package_id);
+
+-- Stock in/out cases (auto ticket numbers: KCCITD-YYYYMMDD-NNN-IN/OUT).
+CREATE TABLE IF NOT EXISTS tickets (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticket_no   TEXT NOT NULL UNIQUE,
+    type        TEXT NOT NULL CHECK (type IN ('IN', 'OUT')),
+    seq         INTEGER NOT NULL CHECK (seq >= 0 AND seq <= 999),
+    person      TEXT NOT NULL DEFAULT '',
+    department  TEXT NOT NULL DEFAULT '',
+    staff_id    TEXT NOT NULL DEFAULT '',
+    site        TEXT NOT NULL DEFAULT '',
+    notes       TEXT NOT NULL DEFAULT '',
+    on_loan     INTEGER NOT NULL DEFAULT 0,
+    condemned   INTEGER NOT NULL DEFAULT 0,
+    follow_up   INTEGER NOT NULL DEFAULT 0,
+    created_by  TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tickets_created ON tickets (created_at);
+CREATE INDEX IF NOT EXISTS idx_tickets_type ON tickets (type);
 """
 
 
@@ -169,6 +189,7 @@ def _migrate(db):
     (e.g. OA PC = 1 PC + 1 Monitor + wired keyboard + mouse).
     v12 adds transactions.follow_up for stock-out batches that need
     a later chase (and triggers admin mail when custodian is blank).
+    v13 adds tickets (cases) with auto numbers KCCITD-YYYYMMDD-NNN-IN/OUT.
     """
     version = db.execute("PRAGMA user_version").fetchone()[0]
     if version < 3:
@@ -259,4 +280,26 @@ def _migrate(db):
         db.execute(
             "ALTER TABLE transactions ADD COLUMN follow_up INTEGER NOT NULL DEFAULT 0"
         )
-    db.execute("PRAGMA user_version = 12")
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS tickets (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticket_no   TEXT NOT NULL UNIQUE,
+            type        TEXT NOT NULL CHECK (type IN ('IN', 'OUT')),
+            seq         INTEGER NOT NULL CHECK (seq >= 0 AND seq <= 999),
+            person      TEXT NOT NULL DEFAULT '',
+            department  TEXT NOT NULL DEFAULT '',
+            staff_id    TEXT NOT NULL DEFAULT '',
+            site        TEXT NOT NULL DEFAULT '',
+            notes       TEXT NOT NULL DEFAULT '',
+            on_loan     INTEGER NOT NULL DEFAULT 0,
+            condemned   INTEGER NOT NULL DEFAULT 0,
+            follow_up   INTEGER NOT NULL DEFAULT 0,
+            created_by  TEXT NOT NULL DEFAULT '',
+            created_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_tickets_created ON tickets (created_at);
+        CREATE INDEX IF NOT EXISTS idx_tickets_type ON tickets (type);
+        """
+    )
+    db.execute("PRAGMA user_version = 13")
