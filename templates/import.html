@@ -85,21 +85,25 @@
       <label for="file">Excel or CSV file <span class="req">*</span></label>
       <input class="input" id="file" name="file" type="file" accept=".xlsx,.csv" required>
       <p class="hint">
-        Header row columns:
-        <strong>Item</strong>, <strong>Model</strong>, <strong>Tagged</strong> (Yes/No),
-        <strong>S/N</strong>, <strong>Asset/EAM No.</strong>, <strong>Quantity</strong>
-        (plus optional Brand, Funding, Project, Project Code, Site).
+        Header row columns (in order):
+        <strong>Item</strong>, <strong>Model</strong>, <strong>Asset/EAM</strong>,
+        <strong>S/N</strong>, <strong>Tagged</strong> (Yes/No), <strong>Quantity</strong>,
+        <strong>Brand</strong>, <strong>Funding</strong>, <strong>Project</strong>,
+        <strong>Project Code</strong>, <strong>Site</strong>.
         <strong>Tagged = Yes</strong> — Model plus S/N and/or EAM; leave Quantity blank.
         <strong>Tagged = No</strong> — Quantity only; leave S/N and EAM blank.
+        Model is optional when untagged (Item is used as the name if Model is blank).
+        Brand is ignored for untagged rows (same as keyboard / mouse / LAN).
         If that product already has tagged units in the database, a Tagged=No row is rejected.
         Keyboard / Mouse default to untagged when Tagged is blank. Site blank means Site B.
         Format code columns as <em>Text</em> in Excel so leading zeros are kept.
       </p>
     </div>
     <div class="field span-2">
-      <label for="reference">Reference for this batch (optional)</label>
+      <label for="reference">PO / supplier reference (optional)</label>
       <input class="input mono" id="reference" name="reference" maxlength="60" placeholder="e.g. PO-2026-052">
-      <p class="hint">Recorded on every imported row in the history — for example the PO the assets came in on.</p>
+      <p class="hint">A stock-in <strong>ticket</strong> is created automatically for the batch (same as Stock In).
+        This optional PO/ref is stored on that ticket’s notes.</p>
     </div>
     <div class="form-actions span-2">
       <a class="btn btn-ghost" href="{{ url_for('import_template_xlsx') }}">Download Excel template</a>
@@ -114,6 +118,9 @@
   <div class="card-head">
     <h2>Import result</h2>
     <div>
+      {% if ticket %}
+      <a class="pill pill-in" href="{{ url_for('ticket_detail', ticket_id=ticket['id']) }}">{{ ticket["ticket_no"] }}</a>
+      {% endif %}
       <span class="pill pill-in">{{ counts["imported"] }} imported</span>
       {% if counts.get("updated") %}<span class="pill pill-in">{{ counts["updated"] }} updated</span>{% endif %}
       {% if counts["skipped"] %}<span class="pill pill-out">{{ counts["skipped"] }} skipped</span>{% endif %}

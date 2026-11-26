@@ -66,10 +66,12 @@ CREATE TABLE IF NOT EXISTS items (
     min_quantity INTEGER NOT NULL DEFAULT 0 CHECK (min_quantity >= 0),
     location     TEXT NOT NULL DEFAULT '',
     notes        TEXT NOT NULL DEFAULT '',
+    deleted_at   TEXT NOT NULL DEFAULT '',
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_items_sku ON items (sku) WHERE sku <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_items_sku ON items (sku)
+    WHERE sku <> '' AND (deleted_at IS NULL OR deleted_at = '');
 
 CREATE TABLE IF NOT EXISTS units (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,11 +86,14 @@ CREATE TABLE IF NOT EXISTS units (
     project      TEXT NOT NULL DEFAULT '',
     project_code TEXT NOT NULL DEFAULT '',
     notes        TEXT NOT NULL DEFAULT '',
+    deleted_at   TEXT NOT NULL DEFAULT '',
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS idx_units_eam ON units (eam_no) WHERE eam_no <> '';
-CREATE UNIQUE INDEX IF NOT EXISTS idx_units_serial ON units (serial_no) WHERE serial_no <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_units_eam ON units (eam_no)
+    WHERE eam_no <> '' AND (deleted_at IS NULL OR deleted_at = '');
+CREATE UNIQUE INDEX IF NOT EXISTS idx_units_serial ON units (serial_no)
+    WHERE serial_no <> '' AND (deleted_at IS NULL OR deleted_at = '');
 CREATE INDEX IF NOT EXISTS idx_units_item ON units (item_id);
 CREATE INDEX IF NOT EXISTS idx_units_status ON units (status);
 
@@ -140,11 +145,11 @@ CREATE TABLE IF NOT EXISTS package_lines (
 );
 CREATE INDEX IF NOT EXISTS idx_package_lines_pkg ON package_lines (package_id);
 
--- Stock in/out cases (auto ticket numbers: KCCITD-YYYYMMDD-NNN-IN/OUT).
+-- Stock cases (auto ticket numbers: KCCITD-YYYYMMDD-NNN-IN/OUT/DELETE).
 CREATE TABLE IF NOT EXISTS tickets (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     ticket_no   TEXT NOT NULL UNIQUE,
-    type        TEXT NOT NULL CHECK (type IN ('IN', 'OUT')),
+    type        TEXT NOT NULL CHECK (type IN ('IN', 'OUT', 'DELETE')),
     seq         INTEGER NOT NULL CHECK (seq >= 0 AND seq <= 999),
     person      TEXT NOT NULL DEFAULT '',
     department  TEXT NOT NULL DEFAULT '',
@@ -220,6 +225,9 @@ def _migrate(db):
     (e.g. Mouse → Mouse (Wired), Cable → LAN Cable (3 Metres) for LAN-3M).
     v16 widens transactions.type for DELETE / EDIT (stocked-in date), keeps
     item_name snapshot, and uses ON DELETE SET NULL so history survives deletes.
+    v17 allows tickets.type = DELETE for justified product / unit removals.
+    v18 adds items.deleted_at / units.deleted_at for soft delete (hidden when set).
+    v19 makes unique SKU / EAM / S/N indexes ignore soft-deleted rows.
     """
     version = db.execute("PRAGMA user_version").fetchone()[0]
     if version < 3:
@@ -442,4 +450,78 @@ def _migrate(db):
             CREATE INDEX IF NOT EXISTS idx_tx_unit ON transactions (unit_id);
             """
         )
-    db.execute("PRAGMA user_version = 16")
+    # v17 — tickets may be DELETE (justified product / unit removals).
+    if version < 17:
+        db.executescript(
+            """
+            CREATE TABLE tickets_v17 (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticket_no   TEXT NOT NULL UNIQUE,
+                type        TEXT NOT NULL CHECK (type IN ('IN', 'OUT', 'DELETE')),
+                seq         INTEGER NOT NULL CHECK (seq >= 0 AND seq <= 999),
+                person      TEXT NOT NULL DEFAULT '',
+                department  TEXT NOT NULL DEFAULT '',
+                staff_id    TEXT NOT NULL DEFAULT '',
+                site        TEXT NOT NULL DEFAULT '',
+                notes       TEXT NOT NULL DEFAULT '',
+                on_loan     INTEGER NOT NULL DEFAULT 0,
+                condemned   INTEGER NOT NULL DEFAULT 0,
+                follow_up   INTEGER NOT NULL DEFAULT 0,
+                created_by  TEXT NOT NULL DEFAULT '',
+                created_at  TEXT NOT NULL
+            );
+            INSERT INTO tickets_v17 (
+                id, ticket_no, type, seq, person, department, staff_id, site, notes,
+                on_loan, condemned, follow_up, created_by, created_at
+            )
+            SELECT id, ticket_no, type, seq, person, department, staff_id, site, notes,
+                   on_loan, condemned, follow_up, created_by, created_at
+            FROM tickets;
+            DROP TABLE tickets;
+            ALTER TABLE tickets_v17 RENAME TO tickets;
+            CREATE INDEX IF NOT EXISTS idx_tickets_created ON tickets (created_at);
+            CREATE INDEX IF NOT EXISTS idx_tickets_type ON tickets (type);
+            """
+        )
+    # v18 — soft delete: deleted_at on items and units (hidden when set).
+    # Unique EAM / S/N only among active (non-deleted) units so codes can be
+    # re-registered after soft-delete; restore fails if the code is already live.
+    if version < 18:
+        cols_items = {r[1] for r in db.execute("PRAGMA table_info(items)").fetchall()}
+        if "deleted_at" not in cols_items:
+            db.execute(
+                "ALTER TABLE items ADD COLUMN deleted_at TEXT NOT NULL DEFAULT ''"
+            )
+        cols_units = {r[1] for r in db.execute("PRAGMA table_info(units)").fetchall()}
+        if "deleted_at" not in cols_units:
+            db.execute(
+                "ALTER TABLE units ADD COLUMN deleted_at TEXT NOT NULL DEFAULT ''"
+            )
+        db.execute("DROP INDEX IF EXISTS idx_units_eam")
+        db.execute("DROP INDEX IF EXISTS idx_units_serial")
+        db.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_units_eam ON units (eam_no)
+               WHERE eam_no <> '' AND (deleted_at IS NULL OR deleted_at = '')"""
+        )
+        db.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_units_serial ON units (serial_no)
+               WHERE serial_no <> '' AND (deleted_at IS NULL OR deleted_at = '')"""
+        )
+    # v19 — unique SKU / EAM / S/N ignore soft-deleted rows.
+    if version < 19:
+        db.execute("DROP INDEX IF EXISTS idx_items_sku")
+        db.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_items_sku ON items (sku)
+               WHERE sku <> '' AND (deleted_at IS NULL OR deleted_at = '')"""
+        )
+        db.execute("DROP INDEX IF EXISTS idx_units_eam")
+        db.execute("DROP INDEX IF EXISTS idx_units_serial")
+        db.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_units_eam ON units (eam_no)
+               WHERE eam_no <> '' AND (deleted_at IS NULL OR deleted_at = '')"""
+        )
+        db.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_units_serial ON units (serial_no)
+               WHERE serial_no <> '' AND (deleted_at IS NULL OR deleted_at = '')"""
+        )
+        db.execute("PRAGMA user_version = 19")

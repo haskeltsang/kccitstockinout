@@ -3,6 +3,7 @@
 {% block heading %}Transaction history{% endblock %}
 {% block actions %}
   <a class="btn btn-ghost" href="{{ url_for('history_csv') }}?{{ request.query_string.decode() }}">Export CSV</a>
+  <a class="btn btn-ghost" href="{{ url_for('history_xlsx') }}?{{ request.query_string.decode() }}">Export Excel</a>
 {% endblock %}
 {% block content %}
 <form class="toolbar" method="get" action="{{ url_for('history') }}">

@@ -7,11 +7,20 @@
     <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m15.5 15.5 4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
     <input class="input" type="search" name="q" value="{{ q }}" placeholder="Search ticket no., person, department, notes…">
   </div>
-  <select class="input" name="type">
-    <option value="" {{ 'selected' if not tx_type }}>All types</option>
-    <option value="IN" {{ 'selected' if tx_type == 'IN' }}>Stock in</option>
-    <option value="OUT" {{ 'selected' if tx_type == 'OUT' }}>Stock out</option>
-  </select>
+  <div class="mode-toggle type-filter" role="group" aria-label="Ticket type">
+    <label class="mode-btn {{ 'active' if not tx_type }}">
+      <input type="radio" name="type" value="" {{ 'checked' if not tx_type }} hidden>All
+    </label>
+    <label class="mode-btn {{ 'active' if tx_type == 'IN' }}">
+      <input type="radio" name="type" value="IN" {{ 'checked' if tx_type == 'IN' }} hidden>In
+    </label>
+    <label class="mode-btn {{ 'active' if tx_type == 'OUT' }}">
+      <input type="radio" name="type" value="OUT" {{ 'checked' if tx_type == 'OUT' }} hidden>Out
+    </label>
+    <label class="mode-btn {{ 'active' if tx_type == 'DELETE' }}">
+      <input type="radio" name="type" value="DELETE" {{ 'checked' if tx_type == 'DELETE' }} hidden>Delete
+    </label>
+  </div>
   <button class="btn btn-ghost" type="submit">Filter</button>
   {% if q or tx_type %}<a class="btn btn-link" href="{{ url_for('tickets') }}">Reset</a>{% endif %}
 </form>
@@ -31,7 +40,10 @@
         <td class="mono"><a class="item-name" href="{{ url_for('ticket_detail', ticket_id=t['id']) }}">{{ t["ticket_no"] }}</a></td>
         <td class="nowrap">{{ t["created_at"] }}</td>
         <td>
-          <span class="pill {{ 'pill-in' if t['type'] == 'IN' else 'pill-out' }}">{{ 'In' if t['type'] == 'IN' else 'Out' }}</span>
+          {% if t["type"] == "IN" %}<span class="pill pill-in">In</span>
+          {% elif t["type"] == "OUT" %}<span class="pill pill-out">Out</span>
+          {% elif t["type"] == "DELETE" %}<span class="pill pill-delete">Delete</span>
+          {% else %}<span class="pill">{{ t["type"] }}</span>{% endif %}
           {% if t["on_loan"] %}<span class="pill pill-loan">On loan</span>{% endif %}
           {% if t["condemned"] %}<span class="pill pill-condemn">Condemned</span>{% endif %}
           {% if t["follow_up"] %}<span class="pill pill-followup">Follow up</span>{% endif %}

@@ -26,6 +26,84 @@
     });
   });
 
+  // ---- Delete with justification modal (product / unit) ------------------
+  (function () {
+    var modal = document.getElementById("justify-delete-modal");
+    var msgEl = document.getElementById("justify-delete-msg");
+    var reasonEl = document.getElementById("justify-delete-reason");
+    var errEl = document.getElementById("justify-delete-error");
+    var cancelBtn = document.getElementById("justify-delete-cancel");
+    var confirmBtn = document.getElementById("justify-delete-confirm");
+    if (!modal || !reasonEl || !confirmBtn) return;
+
+    var pendingForm = null;
+
+    function openModal(form) {
+      pendingForm = form;
+      if (msgEl) msgEl.textContent = form.getAttribute("data-justify-delete") || "";
+      reasonEl.value = "";
+      if (errEl) errEl.hidden = true;
+      modal.hidden = false;
+      document.body.classList.add("modal-open");
+      window.setTimeout(function () { reasonEl.focus(); }, 20);
+    }
+
+    function closeModal() {
+      pendingForm = null;
+      modal.hidden = true;
+      document.body.classList.remove("modal-open");
+    }
+
+    function submitWithReason() {
+      var reason = (reasonEl.value || "").trim();
+      if (!reason) {
+        if (errEl) errEl.hidden = false;
+        reasonEl.focus();
+        return;
+      }
+      if (!pendingForm) return;
+      var form = pendingForm;
+      var hidden = form.querySelector('input[name="justification"]');
+      if (hidden) hidden.value = reason;
+      else {
+        hidden = document.createElement("input");
+        hidden.type = "hidden";
+        hidden.name = "justification";
+        hidden.value = reason;
+        form.appendChild(hidden);
+      }
+      form.setAttribute("data-justify-ok", "1");
+      closeModal();
+      form.submit();
+    }
+
+    document.querySelectorAll("form[data-justify-delete]").forEach(function (form) {
+      form.addEventListener("submit", function (event) {
+        if (form.getAttribute("data-justify-ok") === "1") {
+          form.removeAttribute("data-justify-ok");
+          return;
+        }
+        event.preventDefault();
+        openModal(form);
+      });
+    });
+
+    cancelBtn && cancelBtn.addEventListener("click", closeModal);
+    confirmBtn.addEventListener("click", submitWithReason);
+    modal.addEventListener("click", function (event) {
+      if (event.target === modal) closeModal();
+    });
+    reasonEl.addEventListener("keydown", function (event) {
+      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        submitWithReason();
+      }
+    });
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Escape" && !modal.hidden) closeModal();
+    });
+  })();
+
   // ---- Dashboard: collapse “Units on the shelf” (+/−) --------------------
   (function () {
     var section = document.getElementById("shelf-section");

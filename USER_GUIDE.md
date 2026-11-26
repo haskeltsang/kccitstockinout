@@ -46,11 +46,11 @@ Keep the console/start window open while you work; closing it stops the app.
 
 ## 4. Tickets (auto case numbers)
 
-Every finished **Stock In** or **Stock Out** batch gets a ticket number like:
+Every finished **Stock In** or **Stock Out** batch (and justified **deletes** / untagged count changes) gets a ticket number like:
 
 `KCCITD-20261126-003-OUT`
 
-- Format: `KCCITD-YYYYMMDD-000…999-IN` or `-OUT`
+- Format: `KCCITD-YYYYMMDD-000…999-IN`, `-OUT`, or `-DELETE`
 - The ticket field on the form is **filled automatically and locked** — you cannot type your own
 - After you finish, you land on that ticket’s page (what was moved)
 - Open **Tickets** anytime to search cases by number, person, department, or notes
@@ -147,18 +147,19 @@ On **Import**, choose **Mouse / Keyboard / LAN cable**:
 ### B. Excel / CSV
 
 1. Download the **Excel template**.
-2. Columns include: **Item**, **Model**, **Tagged** (Yes/No), **S/N**, **Asset/EAM No.**, **Quantity**, plus optional Brand, Funding, Project, Project Code, Site.
+2. Column order: **Item**, **Model**, **Asset/EAM**, **S/N**, **Tagged**, **Quantity**, **Brand**, **Funding**, **Project**, **Project Code**, **Site**.
 3. Rules for **Tagged**:
 
 | Tagged | What to fill |
 |--------|----------------|
 | **Yes** | Model + S/N and/or EAM. Leave Quantity blank. |
-| **No** | Quantity only. Leave S/N and EAM blank. |
+| **No** | Quantity only. Leave S/N and EAM blank. Model is optional (Item used as name if blank). Brand is ignored (like KB/MS/LAN). |
 | Blank | Keyboard/Mouse → treated as untagged; other items → treated as tagged |
 
 4. If a product **already has tagged units** in the database, a **Tagged = No** row is **rejected**.
 5. Re-import is safe: matching S/N or EAM can fill missing codes and refresh funding/project when those cells have values.
 6. Upload and review the result table (imported / updated / skipped / errors).
+7. Every import that adds stock creates **one stock-in ticket** (`KCCITD-…-IN`) for the whole batch — open it from **Tickets** or the result header. Optional PO/ref goes on the ticket notes.
 
 Format S/N and EAM columns as **Text** in Excel so leading zeros are kept.
 
@@ -168,6 +169,8 @@ Format S/N and EAM columns as **Text** in Excel so leading zeros are kept.
 
 - Search/filter on **Items**; open a product for units and movement history.
 - **Edit category & model** on the product page (display name follows model). Fixed accessories (`MS-*`, `KB-*`, `LAN-3M`) are locked. If the new category + model already exists (e.g. fixing an “Other” import), this product is merged into that one automatically.
+- **Edit untagged quantity** — only on products with **no** S/N/EAM units; a **justification is required** and a stock-in or stock-out **ticket** is created for the change.
+- **Delete product or unit** — a **justification is required**; a **delete ticket** (`KCCITD-…-DELETE`) is created. Deletes are **soft**: the row stays in the database with a `deleted_at` stamp and is hidden from Items / Stock / lookups. Open the delete ticket and use **Restore** to clear `deleted_at` and show it again.
 - **Register unit** / **Edit** unit for S/N, EAM, site, funding, etc.
 - **Low-stock warning** — set a minimum; Dashboard alerts when shelf stock drops to that level.
 
@@ -176,9 +179,10 @@ Format S/N and EAM columns as **Text** in Excel so leading zeros are kept.
 ## 10. History & export
 
 - **History** — filter by type (**In**, **Out**, **Delete**, **Edit**), dates, and search (EAM, S/N, person, department, ticket, etc.).
-- **Delete** events are logged when you remove a product or a unit; the item name stays on the row even after the product is gone.
+- **Delete** events are logged when you soft-delete a product or unit; the item name stays on the history row. Restore from the delete ticket if needed.
 - **Edit** events are logged when you change a unit’s **stocked-in date** (notes show old → new).
-- **Export CSV** from History or Items for Excel.
+- **Export CSV** or **Export Excel** from History (current filters) or Items.
+  Items Excel uses the same header style as the import template and includes every tagged unit plus untagged quantity rows (status, holder, funding, etc.).
 
 ---
 

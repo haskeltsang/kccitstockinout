@@ -45,14 +45,21 @@ import db as database
 DEFAULT_PORT = 8077
 PAGE_SIZE = 50
 
+# Soft-delete filters (empty deleted_at = active).
+ITEM_ACTIVE_SQL = "(i.deleted_at IS NULL OR i.deleted_at = '')"
+UNIT_ACTIVE_SQL = "(u.deleted_at IS NULL OR u.deleted_at = '')"
+ITEM_ACTIVE_WHERE = "(deleted_at IS NULL OR deleted_at = '')"
+UNIT_ACTIVE_WHERE = "(deleted_at IS NULL OR deleted_at = '')"
+
 # Available on-shelf stock — condemned units stay registered but are not
 # counted as usable inventory (dashboard, items list, low-stock, etc.).
 UNITS_IN_SQL = (
     "(SELECT COUNT(*) FROM units u WHERE u.item_id = i.id "
-    "AND u.status = 'in_stock' AND u.condemned = 0)"
+    f"AND u.status = 'in_stock' AND u.condemned = 0 AND {UNIT_ACTIVE_SQL})"
 )
 UNITS_OUT_SQL = (
-    "(SELECT COUNT(*) FROM units u WHERE u.item_id = i.id AND u.status = 'checked_out')"
+    "(SELECT COUNT(*) FROM units u WHERE u.item_id = i.id "
+    f"AND u.status = 'checked_out' AND {UNIT_ACTIVE_SQL})"
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -136,6 +143,16 @@ def form_int(value, default=0):
         return int(str(value).strip())
     except (TypeError, ValueError):
         return default
+
+
+def require_justification(raw, *, max_len=500):
+    """Return stripped justification, or (None, error message)."""
+    reason = (raw or "").strip()
+    if not reason:
+        return None, "Enter a justification for this action."
+    if len(reason) > max_len:
+        return None, f"Justification must be {max_len} characters or fewer."
+    return reason, None
 
 
 _FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
@@ -310,11 +327,17 @@ def _stock_out_admin_alert(ops, dept, ref_no, staff_id, notes, follow_up, userna
     )
 
 
-def get_item_or_404(item_id):
+def _is_deleted(row):
+    return bool((row["deleted_at"] or "").strip()) if row is not None and "deleted_at" in row.keys() else False
+
+
+def get_item_or_404(item_id, *, include_deleted=False):
     item = database.get_db().execute(
         "SELECT * FROM items WHERE id = ?", (item_id,)
     ).fetchone()
     if item is None:
+        abort(404)
+    if not include_deleted and _is_deleted(item):
         abort(404)
     return item
 
@@ -599,14 +622,16 @@ def delete_user(user_id):
 def dashboard():
     conn = database.get_db()
     totals = conn.execute(
-        """SELECT (SELECT COUNT(*) FROM items) AS items,
-                  ((SELECT COALESCE(SUM(quantity), 0) FROM items) +
-                   (SELECT COUNT(*) FROM units WHERE status = 'in_stock'
-                      AND condemned = 0)) AS units"""
+        f"""SELECT (SELECT COUNT(*) FROM items WHERE {ITEM_ACTIVE_WHERE}) AS items,
+                   ((SELECT COALESCE(SUM(quantity), 0) FROM items
+                     WHERE {ITEM_ACTIVE_WHERE}) +
+                    (SELECT COUNT(*) FROM units WHERE status = 'in_stock'
+                       AND condemned = 0 AND {UNIT_ACTIVE_WHERE})) AS units"""
     ).fetchone()
     low = conn.execute(
         f"""SELECT * FROM (
               SELECT i.*, (i.quantity + {UNITS_IN_SQL}) AS available FROM items i
+              WHERE {ITEM_ACTIVE_SQL}
             )
             WHERE min_quantity > 0 AND available <= min_quantity
             ORDER BY available ASC, name COLLATE NOCASE"""
@@ -628,16 +653,17 @@ def dashboard():
             ORDER BY t.created_at DESC, t.id DESC LIMIT 9"""
     ).fetchall()
     cat_rows = conn.execute(
-        """SELECT category, COUNT(*) AS items, COALESCE(SUM(quantity), 0) AS bulk
-           FROM items GROUP BY category"""
+        f"""SELECT category, COUNT(*) AS items, COALESCE(SUM(quantity), 0) AS bulk
+            FROM items WHERE {ITEM_ACTIVE_WHERE} GROUP BY category"""
     ).fetchall()
     units_by_cat = {
         r["category"]: r["c"]
         for r in conn.execute(
-            """SELECT i.category AS category, COUNT(*) AS c
-               FROM units u JOIN items i ON i.id = u.item_id
-               WHERE u.status = 'in_stock' AND u.condemned = 0
-               GROUP BY i.category"""
+            f"""SELECT i.category AS category, COUNT(*) AS c
+                FROM units u JOIN items i ON i.id = u.item_id
+                WHERE u.status = 'in_stock' AND u.condemned = 0
+                  AND {UNIT_ACTIVE_SQL} AND {ITEM_ACTIVE_SQL}
+                GROUP BY i.category"""
         )
     }
     cats = [
@@ -667,8 +693,11 @@ def dashboard():
                      ELSE {UNITS_IN_SQL}
                    END AS on_shelf
             FROM items i
-            WHERE EXISTS (SELECT 1 FROM units u WHERE u.item_id = i.id)
-               OR UPPER(i.sku) IN ({acc_placeholders})
+            WHERE {ITEM_ACTIVE_SQL}
+              AND (
+                EXISTS (SELECT 1 FROM units u WHERE u.item_id = i.id AND {UNIT_ACTIVE_SQL})
+                OR UPPER(i.sku) IN ({acc_placeholders})
+              )
             ORDER BY on_shelf DESC, i.name COLLATE NOCASE""",
         acc_skus + acc_skus,
     ).fetchall()
@@ -688,26 +717,32 @@ def items():
     q = request.args.get("q", "").strip()
     category = request.args.get("category", "").strip()
     clauses, params = [], []
+    clauses.append(ITEM_ACTIVE_SQL)
     if q:
         like = f"%{q}%"
         clauses.append(
             "(i.name LIKE ? OR i.sku LIKE ? OR i.brand LIKE ? OR i.model LIKE ? "
             "OR i.location LIKE ? OR i.id IN "
-            "(SELECT item_id FROM units WHERE serial_no LIKE ? OR eam_no LIKE ?))"
+            f"(SELECT item_id FROM units WHERE (serial_no LIKE ? OR eam_no LIKE ?) "
+            f"AND {UNIT_ACTIVE_WHERE}))"
         )
         params += [like] * 7
     if category:
         clauses.append("i.category = ?")
         params.append(category)
-    sql = f"SELECT i.*, {UNITS_IN_SQL} AS units_in, {UNITS_OUT_SQL} AS units_out FROM items i"
-    if clauses:
-        sql += " WHERE " + " AND ".join(clauses)
-    sql += " ORDER BY i.name COLLATE NOCASE"
+    sql = (
+        f"SELECT i.*, {UNITS_IN_SQL} AS units_in, {UNITS_OUT_SQL} AS units_out "
+        f"FROM items i WHERE " + " AND ".join(clauses) +
+        " ORDER BY i.name COLLATE NOCASE"
+    )
     conn = database.get_db()
     rows = conn.execute(sql, params).fetchall()
     cats = [
         r["category"]
-        for r in conn.execute("SELECT DISTINCT category FROM items ORDER BY category")
+        for r in conn.execute(
+            f"SELECT DISTINCT category FROM items WHERE {ITEM_ACTIVE_WHERE} "
+            "ORDER BY category"
+        )
     ]
     return render_template("items.html", items=rows, q=q, category=category, cats=cats)
 
@@ -721,12 +756,13 @@ def find_asset():
         return redirect(request.referrer or url_for("dashboard"))
     conn = database.get_db()
     unit = conn.execute(
-        """SELECT u.id, u.item_id, u.eam_no, u.serial_no, i.name AS item_name
-           FROM units u
-           JOIN items i ON i.id = u.item_id
-           WHERE (u.eam_no <> '' AND u.eam_no = ? COLLATE NOCASE)
-              OR (u.serial_no <> '' AND u.serial_no = ? COLLATE NOCASE)
-           LIMIT 1""",
+        f"""SELECT u.id, u.item_id, u.eam_no, u.serial_no, i.name AS item_name
+            FROM units u
+            JOIN items i ON i.id = u.item_id
+            WHERE {UNIT_ACTIVE_SQL} AND {ITEM_ACTIVE_SQL}
+              AND ((u.eam_no <> '' AND u.eam_no = ? COLLATE NOCASE)
+                   OR (u.serial_no <> '' AND u.serial_no = ? COLLATE NOCASE))
+            LIMIT 1""",
         (code, code),
     ).fetchone()
     if unit is not None:
@@ -740,7 +776,8 @@ def find_asset():
         )
         return redirect(url_for("history", q=lookup))
     item = conn.execute(
-        "SELECT id, name, sku FROM items WHERE sku = ? COLLATE NOCASE LIMIT 1",
+        f"""SELECT id, name, sku FROM items
+            WHERE sku = ? COLLATE NOCASE AND {ITEM_ACTIVE_WHERE} LIMIT 1""",
         (code,),
     ).fetchone()
     if item is not None:
@@ -755,34 +792,35 @@ def item_detail(item_id):
     conn = database.get_db()
     item = get_item_or_404(item_id)
     counts = conn.execute(
-        """SELECT (SELECT COUNT(*) FROM units WHERE item_id = ? AND status = 'in_stock'
-                     AND condemned = 0) AS units_in,
-                  (SELECT COUNT(*) FROM units WHERE item_id = ? AND status = 'checked_out') AS units_out,
-                  (SELECT COUNT(*) FROM units WHERE item_id = ? AND status = 'checked_out'
-                     AND on_loan = 1) AS units_loan""",
+        f"""SELECT (SELECT COUNT(*) FROM units WHERE item_id = ? AND status = 'in_stock'
+                      AND condemned = 0 AND {UNIT_ACTIVE_WHERE}) AS units_in,
+                   (SELECT COUNT(*) FROM units WHERE item_id = ? AND status = 'checked_out'
+                      AND {UNIT_ACTIVE_WHERE}) AS units_out,
+                   (SELECT COUNT(*) FROM units WHERE item_id = ? AND status = 'checked_out'
+                      AND on_loan = 1 AND {UNIT_ACTIVE_WHERE}) AS units_loan""",
         (item_id, item_id, item_id),
     ).fetchone()
     units = conn.execute(
-        """SELECT u.*,
-                  (SELECT t.person FROM transactions t
-                   WHERE t.unit_id = u.id AND t.type = 'OUT'
-                   ORDER BY t.created_at DESC, t.id DESC LIMIT 1) AS holder,
-                  COALESCE(
-                    (SELECT t.created_at FROM transactions t
-                     WHERE t.unit_id = u.id AND t.type = 'IN'
-                     ORDER BY t.created_at DESC, t.id DESC LIMIT 1),
-                    u.created_at
-                  ) AS stocked_in_at
-           FROM units u WHERE u.item_id = ?
-           ORDER BY u.status DESC, u.eam_no, u.serial_no""",
+        f"""SELECT u.*,
+                   (SELECT t.person FROM transactions t
+                    WHERE t.unit_id = u.id AND t.type = 'OUT'
+                    ORDER BY t.created_at DESC, t.id DESC LIMIT 1) AS holder,
+                   COALESCE(
+                     (SELECT t.created_at FROM transactions t
+                      WHERE t.unit_id = u.id AND t.type = 'IN'
+                      ORDER BY t.created_at DESC, t.id DESC LIMIT 1),
+                     u.created_at
+                   ) AS stocked_in_at
+            FROM units u WHERE u.item_id = ? AND {UNIT_ACTIVE_SQL}
+            ORDER BY u.status DESC, u.eam_no, u.serial_no""",
         (item_id,),
     ).fetchall()
     history = conn.execute(
-        """SELECT t.*, u.eam_no AS unit_eam, u.serial_no AS unit_serial
-           FROM transactions t
-           LEFT JOIN units u ON u.id = t.unit_id
-           WHERE t.item_id = ?
-           ORDER BY t.created_at DESC, t.id DESC LIMIT 50""",
+        f"""SELECT t.*, u.eam_no AS unit_eam, u.serial_no AS unit_serial
+            FROM transactions t
+            LEFT JOIN units u ON u.id = t.unit_id
+            WHERE t.item_id = ?
+            ORDER BY t.created_at DESC, t.id DESC LIMIT 50""",
         (item_id,),
     ).fetchall()
     highlight_unit_id = form_int(request.args.get("unit"), default=0) or None
@@ -799,6 +837,7 @@ def item_detail(item_id):
         highlight_unit_id=highlight_unit_id,
         categories=_stock_in_categories(conn),
         is_fixed_accessory=sku in ACCESSORY_SKUS,
+        is_untagged_only=not _item_has_tagged_units(conn, item_id),
     )
 
 
@@ -945,10 +984,11 @@ def edit_item(item_id):
 
     conn = database.get_db()
     clash = conn.execute(
-        """SELECT * FROM items
-           WHERE id <> ?
-             AND category = ? COLLATE NOCASE
-             AND name = ? COLLATE NOCASE""",
+        f"""SELECT * FROM items
+            WHERE id <> ?
+              AND category = ? COLLATE NOCASE
+              AND name = ? COLLATE NOCASE
+              AND {ITEM_ACTIVE_WHERE}""",
         (item_id, category, model),
     ).fetchone()
     if clash is not None:
@@ -1004,6 +1044,83 @@ def set_min_level(item_id):
     return redirect(url_for("item_detail", item_id=item_id))
 
 
+@app.route("/items/<int:item_id>/untagged-qty", methods=["POST"])
+def edit_untagged_qty(item_id):
+    """Set untagged shelf quantity; requires justification and creates an IN/OUT ticket."""
+    item = get_item_or_404(item_id)
+    conn = database.get_db()
+    if _item_has_tagged_units(conn, item_id):
+        flash(
+            "This product has tagged units (S/N or EAM) — untagged quantity "
+            "can’t be edited here. Use Stock In / Out instead.",
+            "error",
+        )
+        return redirect(url_for("item_detail", item_id=item_id))
+    new_qty = form_int(request.form.get("quantity"), default=-1)
+    reason, err = require_justification(request.form.get("justification"))
+    if new_qty < 0 or new_qty > 100000:
+        flash("Untagged quantity must be a number from 0 to 100000.", "error")
+        return redirect(url_for("item_detail", item_id=item_id))
+    if err:
+        flash(err, "error")
+        return redirect(url_for("item_detail", item_id=item_id))
+
+    old_qty = int(item["quantity"] or 0)
+    if new_qty == old_qty:
+        flash("Untagged quantity is unchanged.", "success")
+        return redirect(url_for("item_detail", item_id=item_id))
+
+    delta = new_qty - old_qty
+    tx_type = "IN" if delta > 0 else "OUT"
+    move_qty = abs(delta)
+    label = item_display_name(
+        brand=item["brand"], model=item["model"], name=item["name"],
+    )
+    now = now_str()
+    try:
+        ticket = allocate_ticket(
+            conn,
+            tx_type,
+            notes=(
+                f"Untagged count adjustment: {old_qty} → {new_qty}. "
+                f"Justification: {reason}"
+            ),
+            created_by=session.get("username", ""),
+            created_at=now,
+        )
+        conn.execute(
+            "UPDATE items SET quantity = ?, updated_at = ? WHERE id = ?",
+            (new_qty, now, item_id),
+        )
+        log_tx(
+            conn,
+            tx_type=tx_type,
+            item_id=item_id,
+            quantity=move_qty,
+            item_name=label,
+            person=session.get("username", ""),
+            reference=ticket["ticket_no"],
+            notes=f"Count {old_qty} → {new_qty}. {reason}",
+            created_at=now,
+        )
+        conn.commit()
+    except ValueError as exc:
+        conn.rollback()
+        flash(str(exc), "error")
+        return redirect(url_for("item_detail", item_id=item_id))
+    except sqlite3.Error:
+        conn.rollback()
+        flash("Could not save the quantity change. Please try again.", "error")
+        return redirect(url_for("item_detail", item_id=item_id))
+
+    flash(
+        f"Untagged stock set to {new_qty} ({'+' if delta > 0 else '−'}{move_qty}) "
+        f"as {ticket['ticket_no']}.",
+        "success",
+    )
+    return redirect(url_for("ticket_detail", ticket_id=ticket["id"]))
+
+
 @app.route("/items/<int:item_id>/delete", methods=["POST"])
 def delete_item(item_id):
     conn = database.get_db()
@@ -1015,8 +1132,13 @@ def delete_item(item_id):
             "error",
         )
         return redirect(url_for("item_detail", item_id=item_id))
+    reason, err = require_justification(request.form.get("justification"))
+    if err:
+        flash(err, "error")
+        return redirect(request.referrer or url_for("items"))
     units_n = conn.execute(
-        "SELECT COUNT(*) AS c FROM units WHERE item_id = ?", (item_id,)
+        f"SELECT COUNT(*) AS c FROM units WHERE item_id = ? AND {UNIT_ACTIVE_WHERE}",
+        (item_id,),
     ).fetchone()["c"]
     qty = int(item["quantity"] or 0)
     detail = []
@@ -1025,29 +1147,65 @@ def delete_item(item_id):
     if units_n:
         detail.append(f"{units_n} unit{'s' if units_n != 1 else ''}")
     stock_bit = f" ({', '.join(detail)} on hand)" if detail else ""
-    # Snapshot brand+model on existing rows, then log DELETE, then remove the item
-    # (item_id becomes NULL — history keeps item_name).
+    # Soft-delete: stamp deleted_at on the product and its units (hidden from lists).
     label = item_display_name(
         brand=item["brand"], model=item["model"], name=item["name"],
     )
-    conn.execute(
-        """UPDATE transactions SET item_name = ?
-           WHERE item_id = ? AND (item_name = '' OR item_name IS NULL)""",
-        (label, item_id),
+    now = now_str()
+    try:
+        ticket = allocate_ticket(
+            conn,
+            "DELETE",
+            notes=(
+                f"Deleted product “{label}” ({item['category']}){stock_bit}. "
+                f"Justification: {reason}"
+            ),
+            created_by=session.get("username", ""),
+            created_at=now,
+        )
+        conn.execute(
+            """UPDATE transactions SET item_name = ?
+               WHERE item_id = ? AND (item_name = '' OR item_name IS NULL)""",
+            (label, item_id),
+        )
+        log_tx(
+            conn,
+            tx_type="DELETE",
+            item_id=item_id,
+            item_name=label,
+            quantity=max(1, qty + units_n),
+            person=session.get("username", ""),
+            reference=ticket["ticket_no"],
+            notes=(
+                f"Deleted product “{label}” ({item['category']}){stock_bit}. "
+                f"Justification: {reason}"
+            ),
+            created_at=now,
+        )
+        conn.execute(
+            "UPDATE items SET deleted_at = ?, updated_at = ? WHERE id = ?",
+            (now, now, item_id),
+        )
+        conn.execute(
+            f"""UPDATE units SET deleted_at = ?, updated_at = ?
+                WHERE item_id = ? AND {UNIT_ACTIVE_WHERE}""",
+            (now, now, item_id),
+        )
+        conn.commit()
+    except ValueError as exc:
+        conn.rollback()
+        flash(str(exc), "error")
+        return redirect(request.referrer or url_for("items"))
+    except sqlite3.Error:
+        conn.rollback()
+        flash("Could not delete the product. Please try again.", "error")
+        return redirect(request.referrer or url_for("items"))
+    flash(
+        f"Deleted “{label}” as {ticket['ticket_no']}. "
+        "You can restore it from the delete ticket.",
+        "success",
     )
-    log_tx(
-        conn,
-        tx_type="DELETE",
-        item_id=item_id,
-        item_name=label,
-        quantity=max(1, qty + units_n),
-        person=session.get("username", ""),
-        notes=f"Deleted product “{label}” ({item['category']}){stock_bit}",
-    )
-    conn.execute("DELETE FROM items WHERE id = ?", (item_id,))
-    conn.commit()
-    flash(f"Deleted “{item['name']}”. The delete is recorded in History.", "success")
-    return redirect(url_for("items"))
+    return redirect(url_for("ticket_detail", ticket_id=ticket["id"]))
 
 
 # ---------------------------------------------------------------------------
@@ -1058,9 +1216,9 @@ IMPORT_ALIASES = {
     "item": {"item", "item name", "product", "product name", "equipment", "name", "description"},
     "model": {"model", "model no", "model name", "model number", "model/type"},
     "eam": {
-        "asset/eam no", "asset/eam no.", "asset eam no", "asset no", "asset no.",
-        "asset number", "asset tag", "asset id", "asset", "eam", "eam no",
-        "eam no.", "eam number", "tag no", "tag number",
+        "asset/eam", "asset/eam no", "asset/eam no.", "asset eam no", "asset no",
+        "asset no.", "asset number", "asset tag", "asset id", "asset", "eam",
+        "eam no", "eam no.", "eam number", "tag no", "tag number",
     },
     "serial": {"s/n", "sn", "serial", "serial no", "serial no.", "serial number"},
     "brand": {"brand", "manufacturer", "make"},
@@ -1115,7 +1273,7 @@ def site_for(raw):
 
 
 IMPORT_TEMPLATE_HEADERS = [
-    "Item", "Model/Type", "Tagged", "S/N", "Asset/EAM No.", "Quantity",
+    "Item", "Model", "Asset/EAM", "S/N", "Tagged", "Quantity",
     "Brand", "Funding", "Project", "Project Code", "Site",
 ]
 # Example rows shipped in the Excel/CSV template (delete or replace when importing).
@@ -1241,20 +1399,23 @@ def _parse_import_tagged(raw):
 
 
 def _item_has_tagged_units(conn, item_id):
-    """True when the product already has at least one S/N or EAM unit."""
+    """True when the product already has at least one active S/N or EAM unit."""
     return conn.execute(
-        """SELECT 1 FROM units
-           WHERE item_id = ?
-             AND ((serial_no IS NOT NULL AND serial_no <> '')
-                  OR (eam_no IS NOT NULL AND eam_no <> ''))
-           LIMIT 1""",
+        f"""SELECT 1 FROM units
+            WHERE item_id = ?
+              AND {UNIT_ACTIVE_WHERE}
+              AND ((serial_no IS NOT NULL AND serial_no <> '')
+                   OR (eam_no IS NOT NULL AND eam_no <> ''))
+            LIMIT 1""",
         (item_id,),
     ).fetchone() is not None
 
 
 def _find_item_by_category_model(conn, category, model):
     return conn.execute(
-        "SELECT * FROM items WHERE category = ? COLLATE NOCASE AND name = ? COLLATE NOCASE",
+        f"""SELECT * FROM items
+            WHERE category = ? COLLATE NOCASE AND name = ? COLLATE NOCASE
+              AND {ITEM_ACTIVE_WHERE}""",
         (category, model),
     ).fetchone()
 
@@ -1330,13 +1491,15 @@ def _ensure_accessory_item(conn, kind, connection, brand="", now=None):
     now = now or now_str()
     brand = (brand or "").strip()
     item = conn.execute(
-        "SELECT * FROM items WHERE sku = ? COLLATE NOCASE", (sku,)
+        f"SELECT * FROM items WHERE sku = ? COLLATE NOCASE AND {ITEM_ACTIVE_WHERE}",
+        (sku,),
     ).fetchone()
     if item is None:
         # Legacy rows used category Peripheral; also try the specific category.
         item = conn.execute(
-            "SELECT * FROM items WHERE name = ? COLLATE NOCASE "
-            "AND (category = ? COLLATE NOCASE OR category = 'Peripheral' COLLATE NOCASE)",
+            f"""SELECT * FROM items WHERE name = ? COLLATE NOCASE
+                AND (category = ? COLLATE NOCASE OR category = 'Peripheral' COLLATE NOCASE)
+                AND {ITEM_ACTIVE_WHERE}""",
             (name, category),
         ).fetchone()
     if item is None:
@@ -1399,12 +1562,14 @@ def _add_accessory_stock(conn, kind, connection, qty, *, reference="", site="Sit
     name, sku, category = ACCESSORY_ITEMS[(kind, connection)]
     now = now or now_str()
     item = conn.execute(
-        "SELECT * FROM items WHERE sku = ? COLLATE NOCASE", (sku,)
+        f"SELECT * FROM items WHERE sku = ? COLLATE NOCASE AND {ITEM_ACTIVE_WHERE}",
+        (sku,),
     ).fetchone()
     if item is None:
         item = conn.execute(
-            "SELECT * FROM items WHERE name = ? COLLATE NOCASE "
-            "AND (category = ? COLLATE NOCASE OR category = 'Peripheral' COLLATE NOCASE)",
+            f"""SELECT * FROM items WHERE name = ? COLLATE NOCASE
+                AND (category = ? COLLATE NOCASE OR category = 'Peripheral' COLLATE NOCASE)
+                AND {ITEM_ACTIVE_WHERE}""",
             (name, category),
         ).fetchone()
     if item is None:
@@ -1434,10 +1599,14 @@ def _add_accessory_stock(conn, kind, connection, qty, *, reference="", site="Sit
     )
     conn.execute(
         """INSERT INTO transactions
-           (item_id, unit_id, type, quantity, person, department, reference, site, notes, created_at)
-           VALUES (?,NULL,'IN',?,?,'',?,?,?,?)""",
-        (item_id, qty, "", reference, site,
-         notes or "Quantity added on the Import page", now),
+           (item_id, unit_id, type, quantity, person, department, reference, site, notes,
+            item_name, created_at)
+           VALUES (?,NULL,'IN',?,?,'',?,?,?,?,?)""",
+        (
+            item_id, qty, "", reference, site,
+            notes or "Quantity added on the Import page",
+            item_display_name(name=name, model=name), now,
+        ),
     )
     return name, sku
 
@@ -1609,7 +1778,7 @@ def import_stocks():
         if request.form.get("mode") == "accessory":
             return _record_accessory_add(database.get_db(), request.form)
         upload = request.files.get("file")
-        reference = request.form.get("reference", "").strip()
+        po_ref = request.form.get("reference", "").strip()
         if not upload or not upload.filename:
             flash("Choose an Excel (.xlsx) or CSV file to import.", "error")
             return render_template("import.html", report=None), 400
@@ -1625,6 +1794,27 @@ def import_stocks():
         conn = database.get_db()
         now = now_str()
         report, seen_codes, item_cache = [], {}, {}
+        ticket = None
+
+        def ensure_import_ticket(site=""):
+            """One IN ticket for the whole Excel batch (first successful import)."""
+            nonlocal ticket
+            if ticket is not None:
+                return ticket["ticket_no"]
+            note_bits = ["Excel import"]
+            if upload.filename:
+                note_bits.append(upload.filename)
+            if po_ref:
+                note_bits.append(f"PO/ref: {po_ref}")
+            ticket = allocate_ticket(
+                conn,
+                "IN",
+                site=site or "",
+                notes=" — ".join(note_bits),
+                created_by=session.get("username", ""),
+                created_at=now,
+            )
+            return ticket["ticket_no"]
 
         def item_id_for(category, model, brand):
             """Items are found or created per (category, model) pair; the
@@ -1635,7 +1825,9 @@ def import_stocks():
             if key in item_cache:
                 return item_cache[key]
             row = conn.execute(
-                "SELECT id, brand FROM items WHERE category = ? COLLATE NOCASE AND name = ? COLLATE NOCASE",
+                f"""SELECT id, brand FROM items
+                    WHERE category = ? COLLATE NOCASE AND name = ? COLLATE NOCASE
+                      AND {ITEM_ACTIVE_WHERE}""",
                 (category, model),
             ).fetchone()
             if row:
@@ -1709,46 +1901,65 @@ def import_stocks():
                     elif accessory:
                         kind, connection = accessory
                         site = site or "Site B"
+                        ref_no = ensure_import_ticket(site)
                         name, sku = _add_accessory_stock(
                             conn, kind, connection, qty,
-                            reference=reference, site=site, notes="Excel import", now=now,
+                            reference=ref_no, site=site, notes="Excel import", now=now,
                         )
                         entry.update(
                             result="imported",
                             detail=f"Added {qty} × {name} ({sku})",
                         )
-                    elif not model:
-                        entry.update(result="error", detail="Missing model")
                     else:
+                        # Untagged bulk: Model is optional — fall back to Item category.
                         site = site or "Site B"
                         category = _category_for(row["item"])
-                        existing_item = _find_item_by_category_model(conn, category, model)
-                        if existing_item and _item_has_tagged_units(conn, existing_item["id"]):
+                        model_name = model or category
+                        if not model_name:
                             entry.update(
                                 result="error",
-                                detail="This product already has tagged units (S/N or EAM) "
-                                       "in stock — cannot import as untagged (Tagged=No)",
+                                detail="Tagged=No rows need an Item or Model",
                             )
                         else:
-                            item_id, created = item_id_for(category, model, row["brand"])
-                            conn.execute(
-                                "UPDATE items SET quantity = quantity + ?, updated_at = ? WHERE id = ?",
-                                (qty, now, item_id),
+                            existing_item = _find_item_by_category_model(
+                                conn, category, model_name,
                             )
-                            conn.execute(
-                                """INSERT INTO transactions
-                                   (item_id, unit_id, type, quantity, person, department,
-                                    reference, site, notes, created_at)
-                                   VALUES (?,NULL,'IN',?,'','',?,?,'Excel import',?)""",
-                                (item_id, qty, reference, site, now),
-                            )
-                            entry.update(
-                                result="imported",
-                                detail=(
-                                    f"Added {qty} untagged"
-                                    + (" — new item created" if created else "")
-                                ),
-                            )
+                            if existing_item and _item_has_tagged_units(
+                                conn, existing_item["id"]
+                            ):
+                                entry.update(
+                                    result="error",
+                                    detail="This product already has tagged units (S/N or EAM) "
+                                           "in stock — cannot import as untagged (Tagged=No)",
+                                )
+                            else:
+                                # Untagged bulk ignores Brand (same as KB/MS/LAN).
+                                item_id, created = item_id_for(
+                                    category, model_name, "",
+                                )
+                                ref_no = ensure_import_ticket(site)
+                                conn.execute(
+                                    "UPDATE items SET quantity = quantity + ?, updated_at = ? "
+                                    "WHERE id = ?",
+                                    (qty, now, item_id),
+                                )
+                                conn.execute(
+                                    """INSERT INTO transactions
+                                       (item_id, unit_id, type, quantity, person, department,
+                                        reference, site, notes, item_name, created_at)
+                                       VALUES (?,NULL,'IN',?,'','',?,?,'Excel import',?,?)""",
+                                    (
+                                        item_id, qty, ref_no, site,
+                                        _item_label_for_id(conn, item_id), now,
+                                    ),
+                                )
+                                entry.update(
+                                    result="imported",
+                                    detail=(
+                                        f"Added {qty} untagged"
+                                        + (" — new item created" if created else "")
+                                    ),
+                                )
                 else:
                     # Tagged — S/N or EAM required; Quantity must be blank.
                     if qty > 0:
@@ -1797,6 +2008,7 @@ def import_stocks():
                             site = site or "Site B"
                             category = _category_for(row["item"])
                             item_id, created = item_id_for(category, model, row["brand"])
+                            ref_no = ensure_import_ticket(site)
                             cur = conn.execute(
                                 """INSERT INTO units
                                    (item_id, serial_no, eam_no, status, site, funding, project,
@@ -1808,9 +2020,12 @@ def import_stocks():
                             conn.execute(
                                 """INSERT INTO transactions
                                    (item_id, unit_id, type, quantity, person, department,
-                                    reference, site, notes, created_at)
-                                   VALUES (?,?,'IN',1,'','',?,?,'Excel import',?)""",
-                                (item_id, cur.lastrowid, reference, site, now),
+                                    reference, site, notes, item_name, created_at)
+                                   VALUES (?,?,'IN',1,'','',?,?,'Excel import',?,?)""",
+                                (
+                                    item_id, cur.lastrowid, ref_no, site,
+                                    _item_label_for_id(conn, item_id), now,
+                                ),
                             )
                             for c in (eam, serial):
                                 if c:
@@ -1821,6 +2036,10 @@ def import_stocks():
                             )
                 report.append(entry)
             conn.commit()
+        except ValueError as exc:
+            conn.rollback()
+            flash(str(exc), "error")
+            return render_template("import.html", report=None), 400
         except sqlite3.Error:
             conn.rollback()
             flash("Could not save the import. Please try again.", "error")
@@ -1839,9 +2058,13 @@ def import_stocks():
         if counts["updated"]:
             n = counts["updated"]
             parts.append(f"updated {n}")
+        if ticket:
+            parts.append(f"ticket {ticket['ticket_no']}")
         if parts:
             flash(f"{'; '.join(parts)}.", "success")
-        return render_template("import.html", report=report, counts=counts)
+        return render_template(
+            "import.html", report=report, counts=counts, ticket=ticket,
+        )
     return render_template("import.html", report=None)
 
 
@@ -1895,7 +2118,8 @@ def import_template_xlsx():
     dv_tagged.prompt = "Yes = S/N or EAM, no Quantity. No = Quantity only, no codes."
     dv_tagged.promptTitle = "Tagged"
     ws.add_data_validation(dv_tagged)
-    dv_tagged.add("C2:C5000")
+    # Tagged is column E in IMPORT_TEMPLATE_HEADERS.
+    dv_tagged.add("E2:E5000")
 
     header_fill = PatternFill("solid", fgColor="EEF2FF")
     header_font = Font(bold=True)
@@ -1907,17 +2131,26 @@ def import_template_xlsx():
         "Dropdown: PC, Laptop, Monitor, iPad, Keyboard, Mouse — or type any other item name.",
         "IT Stock Manager",
     )
-    ws["C1"].comment = Comment(
+    ws["E1"].comment = Comment(
         "Yes = tracked by S/N or EAM (leave Quantity blank). "
         "No = untagged quantity stock (leave S/N and EAM blank). "
         "Rejected if this product already has tagged units in the database.",
+        "IT Stock Manager",
+    )
+    ws["B1"].comment = Comment(
+        "Required for Tagged=Yes. Optional for Tagged=No — if blank, Item is used as the name.",
+        "IT Stock Manager",
+    )
+    ws["G1"].comment = Comment(
+        "Used for Tagged=Yes only. Ignored for untagged rows and keyboard/mouse/LAN.",
         "IT Stock Manager",
     )
     ws["F1"].comment = Comment(
         "Required when Tagged=No (or Keyboard/Mouse). Leave blank when Tagged=Yes.",
         "IT Stock Manager",
     )
-    widths = (14, 18, 10, 16, 16, 10, 14, 16, 16, 14, 10)
+    # Item, Model, Asset/EAM, S/N, Tagged, Quantity, Brand, Funding, Project, Project Code, Site
+    widths = (14, 18, 16, 16, 10, 10, 14, 16, 16, 14, 10)
     for col_idx, width in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(col_idx)].width = width
     ws.freeze_panes = "A2"
@@ -1954,13 +2187,15 @@ def import_template_csv():
 # Individual units (tracked assets with S/N + EAM)
 # ---------------------------------------------------------------------------
 
-def get_unit_or_404(unit_id):
+def get_unit_or_404(unit_id, *, include_deleted=False):
     unit = database.get_db().execute(
-        """SELECT u.*, i.name AS item_name FROM units u
-           JOIN items i ON i.id = u.item_id WHERE u.id = ?""",
+        f"""SELECT u.*, i.name AS item_name FROM units u
+            JOIN items i ON i.id = u.item_id WHERE u.id = ?""",
         (unit_id,),
     ).fetchone()
     if unit is None:
+        abort(404)
+    if not include_deleted and _is_deleted(unit):
         abort(404)
     return unit
 
@@ -1972,9 +2207,10 @@ def code_clash(conn, serial, eam, exclude_unit_id=None):
     filter applies to both — otherwise AND binds tighter than OR and editing a
     unit's own S/N (unchanged) falsely looks like a clash with itself.
     """
-    sql = """SELECT id FROM units
-             WHERE ((serial_no <> '' AND serial_no = ? COLLATE NOCASE)
-                 OR (eam_no <> '' AND eam_no = ? COLLATE NOCASE))"""
+    sql = f"""SELECT id FROM units
+              WHERE {UNIT_ACTIVE_WHERE}
+                AND ((serial_no <> '' AND serial_no = ? COLLATE NOCASE)
+                  OR (eam_no <> '' AND eam_no = ? COLLATE NOCASE))"""
     params = [serial, eam]
     if exclude_unit_id is not None:
         sql += " AND id <> ?"
@@ -1987,7 +2223,9 @@ def _unit_by_serial(conn, serial):
     if not serial:
         return None
     return conn.execute(
-        "SELECT * FROM units WHERE serial_no <> '' AND serial_no = ? COLLATE NOCASE",
+        f"""SELECT * FROM units
+            WHERE serial_no <> '' AND serial_no = ? COLLATE NOCASE
+              AND {UNIT_ACTIVE_WHERE}""",
         (serial,),
     ).fetchone()
 
@@ -1996,7 +2234,9 @@ def _unit_by_eam(conn, eam):
     if not eam:
         return None
     return conn.execute(
-        "SELECT * FROM units WHERE eam_no <> '' AND eam_no = ? COLLATE NOCASE",
+        f"""SELECT * FROM units
+            WHERE eam_no <> '' AND eam_no = ? COLLATE NOCASE
+              AND {UNIT_ACTIVE_WHERE}""",
         (eam,),
     ).fetchone()
 
@@ -2241,28 +2481,61 @@ def edit_unit(unit_id):
 @app.route("/units/<int:unit_id>/delete", methods=["POST"])
 def delete_unit(unit_id):
     unit = get_unit_or_404(unit_id)
+    item_id = unit["item_id"]
+    reason, err = require_justification(request.form.get("justification"))
+    if err:
+        flash(err, "error")
+        return redirect(url_for("item_detail", item_id=item_id))
     conn = database.get_db()
     code = unit["eam_no"] or unit["serial_no"] or f"#{unit_id}"
-    log_tx(
-        conn,
-        tx_type="DELETE",
-        item_id=unit["item_id"],
-        unit_id=unit_id,
-        person=session.get("username", ""),
-        site=unit["site"] or "",
-        notes=(
-            f"Deleted unit {code}"
-            f"{' (condemned)' if unit['condemned'] else ''}"
-            f" — status was {unit['status']}"
-        ),
-    )
-    conn.execute("DELETE FROM units WHERE id = ?", (unit_id,))
-    conn.commit()
+    now = now_str()
+    try:
+        ticket = allocate_ticket(
+            conn,
+            "DELETE",
+            site=unit["site"] or "",
+            notes=(
+                f"Deleted unit {code}"
+                f"{' (condemned)' if unit['condemned'] else ''}"
+                f" — status was {unit['status']}. Justification: {reason}"
+            ),
+            created_by=session.get("username", ""),
+            created_at=now,
+        )
+        log_tx(
+            conn,
+            tx_type="DELETE",
+            item_id=item_id,
+            unit_id=unit_id,
+            person=session.get("username", ""),
+            site=unit["site"] or "",
+            reference=ticket["ticket_no"],
+            notes=(
+                f"Deleted unit {code}"
+                f"{' (condemned)' if unit['condemned'] else ''}"
+                f" — status was {unit['status']}. Justification: {reason}"
+            ),
+            created_at=now,
+        )
+        conn.execute(
+            "UPDATE units SET deleted_at = ?, updated_at = ? WHERE id = ?",
+            (now, now, unit_id),
+        )
+        conn.commit()
+    except ValueError as exc:
+        conn.rollback()
+        flash(str(exc), "error")
+        return redirect(url_for("item_detail", item_id=item_id))
+    except sqlite3.Error:
+        conn.rollback()
+        flash("Could not delete the unit. Please try again.", "error")
+        return redirect(url_for("item_detail", item_id=item_id))
     flash(
-        f"Deleted unit {code}. Delete and past movements stay in History.",
+        f"Deleted unit {code} as {ticket['ticket_no']}. "
+        "You can restore it from the delete ticket.",
         "success",
     )
-    return redirect(url_for("item_detail", item_id=unit["item_id"]))
+    return redirect(url_for("ticket_detail", ticket_id=ticket["id"]))
 
 
 # ---------------------------------------------------------------------------
@@ -2321,7 +2594,8 @@ def _package_form_options(conn):
     seen = {c.lower() for c in preferred}
     extras = []
     for r in conn.execute(
-        "SELECT category, sku FROM items WHERE category <> '' OR sku <> ''"
+        f"""SELECT category, sku FROM items
+            WHERE ({ITEM_ACTIVE_WHERE}) AND (category <> '' OR sku <> '')"""
     ).fetchall():
         sku = (r["sku"] or "").upper()
         if sku in ACCESSORY_SKU_LABELS:
@@ -2338,9 +2612,10 @@ def _package_form_options(conn):
     categories = preferred + extras
     items = conn.execute(
         """SELECT id, name, sku, category FROM items
-           WHERE sku = '' OR UPPER(sku) NOT IN ({skus})
+           WHERE ({active}) AND (sku = '' OR UPPER(sku) NOT IN ({skus}))
            ORDER BY name COLLATE NOCASE""".format(
-            skus=",".join("?" * len(ACCESSORY_SKUS))
+            active=ITEM_ACTIVE_WHERE,
+            skus=",".join("?" * len(ACCESSORY_SKUS)),
         ),
         sorted(ACCESSORY_SKUS),
     ).fetchall()
@@ -2530,7 +2805,7 @@ def _stock_in_categories(conn):
     skip = {"peripheral"}
     extras = []
     for r in conn.execute(
-        "SELECT DISTINCT category FROM items WHERE category <> ''"
+        f"SELECT DISTINCT category FROM items WHERE category <> '' AND {ITEM_ACTIVE_WHERE}"
     ).fetchall():
         c = r["category"]
         if c.lower() in seen or c.lower() in skip:
@@ -2595,8 +2870,8 @@ def allocate_ticket(conn, tx_type, *, person="", department="", staff_id="",
                     site="", notes="", on_loan=False, condemned=False,
                     follow_up=False, created_by="", created_at=None):
     """Reserve the next ticket number and insert the case row. Returns ticket dict."""
-    if tx_type not in ("IN", "OUT"):
-        raise ValueError("Ticket type must be IN or OUT.")
+    if tx_type not in ("IN", "OUT", "DELETE"):
+        raise ValueError("Ticket type must be IN, OUT, or DELETE.")
     day = _ticket_day_key()
     created_at = created_at or now_str()
     last_err = None
@@ -2640,13 +2915,15 @@ def _stock_form(tx_type):
                    EXISTS (
                      SELECT 1 FROM units u
                      WHERE u.item_id = i.id
+                       AND {UNIT_ACTIVE_SQL}
                        AND (u.serial_no <> '' OR u.eam_no <> '')
                    ) AS has_tagged
             FROM items i
+            WHERE {ITEM_ACTIVE_SQL}
             ORDER BY i.name COLLATE NOCASE"""
     ).fetchall()
     accessory = conn.execute(
-        f"""SELECT * FROM items WHERE sku IN
+        f"""SELECT * FROM items WHERE {ITEM_ACTIVE_WHERE} AND sku IN
             ({",".join("?" * len(ACCESSORY_SKUS))})""",
         sorted(ACCESSORY_SKUS),
     ).fetchall()
@@ -2732,8 +3009,9 @@ def _record_stock(tx_type):
         for op in ops:
             if op["kind"] == "unit":
                 unit = conn.execute(
-                    """SELECT u.*, i.name AS item_name FROM units u
-                       JOIN items i ON i.id = u.item_id WHERE u.id = ?""",
+                    f"""SELECT u.*, i.name AS item_name FROM units u
+                        JOIN items i ON i.id = u.item_id
+                        WHERE u.id = ? AND {UNIT_ACTIVE_SQL} AND {ITEM_ACTIVE_SQL}""",
                     (op["ref"],),
                 ).fetchone()
                 if unit is None:
@@ -2749,7 +3027,10 @@ def _record_stock(tx_type):
                     return _stock_form(tx_type), 400
                 op["unit"] = unit
             else:
-                item = conn.execute("SELECT * FROM items WHERE id = ?", (op["ref"],)).fetchone()
+                item = conn.execute(
+                    f"SELECT * FROM items WHERE id = ? AND {ITEM_ACTIVE_WHERE}",
+                    (op["ref"],),
+                ).fetchone()
                 if item is None:
                     flash("One of the scanned items no longer exists — please rescan.", "error")
                     return _stock_form(tx_type), 400
@@ -2974,7 +3255,7 @@ def tickets():
     q = request.args.get("q", "").strip()
     tx_type = request.args.get("type", "").strip().upper()
     clauses, params = [], []
-    if tx_type in ("IN", "OUT"):
+    if tx_type in ("IN", "OUT", "DELETE"):
         clauses.append("t.type = ?")
         params.append(tx_type)
     if q:
@@ -3037,6 +3318,7 @@ def ticket_detail(ticket_id):
         ticket=ticket,
         lines=lines,
         unit_total=unit_total,
+        can_restore=_ticket_restorable(conn, ticket),
     )
 
 
@@ -3049,6 +3331,145 @@ def ticket_by_no(ticket_no):
     if row is None:
         abort(404)
     return redirect(url_for("ticket_detail", ticket_id=row["id"]))
+
+
+def _ticket_restorable(conn, ticket):
+    """True when this DELETE ticket still has soft-deleted items/units to restore."""
+    if ticket["type"] != "DELETE":
+        return False
+    rows = conn.execute(
+        """SELECT item_id, unit_id FROM transactions
+           WHERE reference = ? AND type = 'DELETE'""",
+        (ticket["ticket_no"],),
+    ).fetchall()
+    for r in rows:
+        if r["unit_id"]:
+            u = conn.execute(
+                "SELECT deleted_at FROM units WHERE id = ?", (r["unit_id"],)
+            ).fetchone()
+            if u is not None and _is_deleted(u):
+                return True
+        elif r["item_id"]:
+            it = conn.execute(
+                "SELECT deleted_at FROM items WHERE id = ?", (r["item_id"],)
+            ).fetchone()
+            if it is not None and _is_deleted(it):
+                return True
+    return False
+
+
+@app.route("/tickets/<int:ticket_id>/restore", methods=["POST"])
+def restore_ticket_delete(ticket_id):
+    """Clear deleted_at for items/units soft-deleted on this DELETE ticket."""
+    conn = database.get_db()
+    ticket = conn.execute(
+        "SELECT * FROM tickets WHERE id = ?", (ticket_id,)
+    ).fetchone()
+    if ticket is None:
+        abort(404)
+    if ticket["type"] != "DELETE":
+        flash("Only delete tickets can be restored.", "error")
+        return redirect(url_for("ticket_detail", ticket_id=ticket_id))
+    if not _ticket_restorable(conn, ticket):
+        flash("Nothing left to restore on this ticket (already restored).", "success")
+        return redirect(url_for("ticket_detail", ticket_id=ticket_id))
+
+    now = now_str()
+    restored = []
+    try:
+        rows = conn.execute(
+            """SELECT item_id, unit_id FROM transactions
+               WHERE reference = ? AND type = 'DELETE'""",
+            (ticket["ticket_no"],),
+        ).fetchall()
+        for r in rows:
+            if r["unit_id"]:
+                unit = conn.execute(
+                    "SELECT * FROM units WHERE id = ?", (r["unit_id"],)
+                ).fetchone()
+                if unit is not None and _is_deleted(unit):
+                    clash = code_clash(
+                        conn, unit["serial_no"] or "", unit["eam_no"] or "",
+                        exclude_unit_id=unit["id"],
+                    )
+                    if clash is not None:
+                        code = unit["eam_no"] or unit["serial_no"] or f"#{r['unit_id']}"
+                        raise ValueError(
+                            f"Cannot restore unit {code}: that EAM/S/N is already "
+                            "in use on another active unit."
+                        )
+                    conn.execute(
+                        "UPDATE units SET deleted_at = '', updated_at = ? WHERE id = ?",
+                        (now, r["unit_id"]),
+                    )
+                    code = unit["eam_no"] or unit["serial_no"] or f"#{r['unit_id']}"
+                    restored.append(f"unit {code}")
+                    # Bring the parent product back if it was soft-deleted too.
+                    parent = conn.execute(
+                        "SELECT deleted_at FROM items WHERE id = ?",
+                        (unit["item_id"],),
+                    ).fetchone()
+                    if parent is not None and _is_deleted(parent):
+                        conn.execute(
+                            "UPDATE items SET deleted_at = '', updated_at = ? WHERE id = ?",
+                            (now, unit["item_id"]),
+                        )
+            elif r["item_id"]:
+                item = conn.execute(
+                    "SELECT * FROM items WHERE id = ?", (r["item_id"],)
+                ).fetchone()
+                if item is not None and _is_deleted(item):
+                    stamp = item["deleted_at"]
+                    siblings = conn.execute(
+                        """SELECT id, serial_no, eam_no FROM units
+                           WHERE item_id = ? AND deleted_at = ?""",
+                        (r["item_id"], stamp),
+                    ).fetchall()
+                    for u in siblings:
+                        clash = code_clash(
+                            conn, u["serial_no"] or "", u["eam_no"] or "",
+                            exclude_unit_id=u["id"],
+                        )
+                        if clash is not None:
+                            code = u["eam_no"] or u["serial_no"] or f"#{u['id']}"
+                            label = item_display_name(
+                                brand=item["brand"], model=item["model"],
+                                name=item["name"],
+                            )
+                            raise ValueError(
+                                f"Cannot restore “{label}”: unit {code} "
+                                "conflicts with an active EAM/S/N."
+                            )
+                    conn.execute(
+                        "UPDATE items SET deleted_at = '', updated_at = ? WHERE id = ?",
+                        (now, r["item_id"]),
+                    )
+                    # Units soft-deleted with the same stamp (product delete) come back.
+                    conn.execute(
+                        """UPDATE units SET deleted_at = '', updated_at = ?
+                           WHERE item_id = ? AND deleted_at = ?""",
+                        (now, r["item_id"], stamp),
+                    )
+                    restored.append(
+                        item_display_name(
+                            brand=item["brand"], model=item["model"], name=item["name"],
+                        )
+                    )
+        conn.commit()
+    except ValueError as exc:
+        conn.rollback()
+        flash(str(exc), "error")
+        return redirect(url_for("ticket_detail", ticket_id=ticket_id))
+    except sqlite3.Error:
+        conn.rollback()
+        flash("Could not restore. Please try again.", "error")
+        return redirect(url_for("ticket_detail", ticket_id=ticket_id))
+
+    if restored:
+        flash(f"Restored: {', '.join(restored)}.", "success")
+    else:
+        flash("Nothing was restored.", "success")
+    return redirect(url_for("ticket_detail", ticket_id=ticket_id))
 
 
 # ---------------------------------------------------------------------------
@@ -3091,13 +3512,27 @@ def history():
     )
 
 
-@app.route("/history.csv")
-def history_csv():
-    where, params, _tx, _q, _df, _dt = history_filters(request.args)
-    rows = database.get_db().execute(
+HISTORY_EXPORT_HEADERS = [
+    "Date", "Type", "Item", "SKU", "Category", "Brand", "Model",
+    "Asset/EAM", "S/N", "Quantity", "Person", "Department", "Reference",
+    "Site", "Staff ID", "On Loan", "Condemned", "Follow up", "Notes",
+]
+
+# Import-template columns first, then extra inventory fields.
+ITEMS_EXPORT_HEADERS = [
+    "Item", "Model", "Asset/EAM", "S/N", "Tagged", "Quantity", "Brand",
+    "Funding", "Project", "Project Code", "Site",
+    "SKU", "Status", "Holder", "Stocked in", "On loan", "Condemned",
+    "Min level", "Location", "Notes",
+]
+
+
+def _history_export_rows(conn, where, params):
+    return conn.execute(
         f"""SELECT {TX_SELECT},
                    {ITEM_LABEL_SQL} AS item_name,
-                   i.sku AS item_sku,
+                   i.sku AS item_sku, i.category AS item_category,
+                   i.brand AS item_brand, i.model AS item_model,
                    u.eam_no AS unit_eam, u.serial_no AS unit_serial
             FROM transactions t
             LEFT JOIN items i ON i.id = t.item_id
@@ -3105,25 +3540,151 @@ def history_csv():
             ORDER BY t.created_at DESC, t.id DESC""",
         params,
     ).fetchall()
+
+
+def _history_export_values(r):
+    return [
+        r["created_at"], r["type"], r["item_name"] or "", r["item_sku"] or "",
+        r["item_category"] or "", r["item_brand"] or "", r["item_model"] or "",
+        r["unit_eam"] or "", r["unit_serial"] or "", r["quantity"],
+        r["person"] or "", r["department"] or "", r["reference"] or "",
+        r["site"] or "", r["staff_id"] or "",
+        "Yes" if r["on_loan"] else "", "Yes" if r["condemned"] else "",
+        "Yes" if r["follow_up"] else "", r["notes"] or "",
+    ]
+
+
+def _items_inventory_rows(conn):
+    """One row per tagged unit, plus one untagged quantity row per product."""
+    units = conn.execute(
+        f"""SELECT i.category, i.name, i.model, i.brand, i.sku, i.min_quantity,
+                   i.location, i.notes AS item_notes, i.quantity AS untagged_qty,
+                   u.eam_no, u.serial_no, u.status, u.site, u.funding, u.project,
+                   u.project_code, u.notes AS unit_notes, u.on_loan, u.condemned,
+                   COALESCE(
+                     (SELECT t.created_at FROM transactions t
+                      WHERE t.unit_id = u.id AND t.type = 'IN'
+                      ORDER BY t.created_at DESC, t.id DESC LIMIT 1),
+                     u.created_at
+                   ) AS stocked_in_at,
+                   (SELECT t.person FROM transactions t
+                    WHERE t.unit_id = u.id AND t.type = 'OUT'
+                    ORDER BY t.created_at DESC, t.id DESC LIMIT 1) AS holder
+            FROM units u
+            JOIN items i ON i.id = u.item_id
+            WHERE {UNIT_ACTIVE_SQL} AND {ITEM_ACTIVE_SQL}
+            ORDER BY i.category COLLATE NOCASE, i.name COLLATE NOCASE,
+                     u.eam_no COLLATE NOCASE, u.serial_no COLLATE NOCASE"""
+    ).fetchall()
+    untagged = conn.execute(
+        f"""SELECT category, name, model, brand, sku, quantity, min_quantity,
+                   location, notes
+            FROM items
+            WHERE quantity > 0 AND {ITEM_ACTIVE_WHERE}
+            ORDER BY category COLLATE NOCASE, name COLLATE NOCASE"""
+    ).fetchall()
+    rows = []
+    for u in units:
+        rows.append([
+            u["category"] or "",
+            u["model"] or u["name"] or "",
+            u["eam_no"] or "",
+            u["serial_no"] or "",
+            "Yes",
+            "",
+            u["brand"] or "",
+            u["funding"] or "",
+            u["project"] or "",
+            u["project_code"] or "",
+            u["site"] or "",
+            u["sku"] or "",
+            u["status"] or "",
+            u["holder"] if u["status"] == "checked_out" else "",
+            u["stocked_in_at"] or "",
+            "Yes" if u["on_loan"] else "",
+            "Yes" if u["condemned"] else "",
+            u["min_quantity"] if u["min_quantity"] else "",
+            u["location"] or "",
+            u["unit_notes"] or u["item_notes"] or "",
+        ])
+    for it in untagged:
+        rows.append([
+            it["category"] or "",
+            it["model"] or it["name"] or "",
+            "",
+            "",
+            "No",
+            it["quantity"],
+            "",  # brand ignored for untagged
+            "",
+            "",
+            "",
+            "",
+            it["sku"] or "",
+            "untagged",
+            "",
+            "",
+            "",
+            "",
+            it["min_quantity"] if it["min_quantity"] else "",
+            it["location"] or "",
+            it["notes"] or "",
+        ])
+    return rows
+
+
+def _xlsx_workbook(sheet_title, headers, rows, widths=None):
+    """Build an .xlsx with the same header look as the import template."""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        abort(500, description="Excel support is missing — run: pip install -r requirements.txt")
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet_title
+    ws.append(list(headers))
+    for row in rows:
+        ws.append(list(row))
+    header_fill = PatternFill("solid", fgColor="EEF2FF")
+    header_font = Font(bold=True)
+    for col_idx in range(1, len(headers) + 1):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.fill = header_fill
+        cell.font = header_font
+    if widths:
+        for col_idx, width in enumerate(widths, start=1):
+            ws.column_dimensions[get_column_letter(col_idx)].width = width
+    else:
+        for col_idx in range(1, len(headers) + 1):
+            ws.column_dimensions[get_column_letter(col_idx)].width = 14
+    ws.freeze_panes = "A2"
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _xlsx_response(content, filename):
+    return Response(
+        content,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}",
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@app.route("/history.csv")
+def history_csv():
+    where, params, _tx, _q, _df, _dt = history_filters(request.args)
+    rows = _history_export_rows(database.get_db(), where, params)
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(
-        ["Date", "Type", "Item", "SKU", "Unit EAM", "Unit S/N", "Quantity",
-         "Person", "Department", "Reference", "Site", "Staff ID", "On Loan",
-         "Condemned", "Follow up", "Notes"]
-    )
+    writer.writerow(HISTORY_EXPORT_HEADERS)
     for r in rows:
-        writer.writerow(
-            [
-                r["created_at"], r["type"], csv_safe(r["item_name"]), csv_safe(r["item_sku"]),
-                csv_safe(r["unit_eam"] or ""), csv_safe(r["unit_serial"] or ""),
-                r["quantity"], csv_safe(r["person"]), csv_safe(r["department"]),
-                csv_safe(r["reference"]), csv_safe(r["site"]), csv_safe(r["staff_id"]),
-                "Yes" if r["on_loan"] else "", "Yes" if r["condemned"] else "",
-                "Yes" if r["follow_up"] else "",
-                csv_safe(r["notes"]),
-            ]
-        )
+        writer.writerow([csv_safe(v) if isinstance(v, str) else v for v in _history_export_values(r)])
     return Response(
         buf.getvalue(),
         mimetype="text/csv",
@@ -3131,15 +3692,32 @@ def history_csv():
     )
 
 
+@app.route("/history.xlsx")
+def history_xlsx():
+    where, params, _tx, _q, _df, _dt = history_filters(request.args)
+    rows = [
+        _history_export_values(r)
+        for r in _history_export_rows(database.get_db(), where, params)
+    ]
+    content = _xlsx_workbook(
+        "History",
+        HISTORY_EXPORT_HEADERS,
+        rows,
+        widths=(16, 10, 22, 12, 16, 12, 16, 14, 14, 10, 14, 14, 22, 10, 12, 10, 12, 10, 28),
+    )
+    return _xlsx_response(content, "stock-history.xlsx")
+
+
 @app.route("/items.csv")
 def items_csv():
     rows = database.get_db().execute(
-        "SELECT * FROM items ORDER BY name COLLATE NOCASE"
+        f"SELECT * FROM items WHERE {ITEM_ACTIVE_WHERE} ORDER BY name COLLATE NOCASE"
     ).fetchall()
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(
-        ["Name", "SKU", "Category", "Brand", "Model", "In stock", "Min level", "Location", "Notes"]
+        ["Name", "SKU", "Category", "Brand", "Model", "In stock", "Min level",
+         "Location", "Notes"]
     )
     for r in rows:
         writer.writerow(
@@ -3156,6 +3734,18 @@ def items_csv():
     )
 
 
+@app.route("/items.xlsx")
+def items_xlsx():
+    rows = _items_inventory_rows(database.get_db())
+    content = _xlsx_workbook(
+        "Stock",
+        ITEMS_EXPORT_HEADERS,
+        rows,
+        widths=(14, 18, 16, 16, 10, 10, 14, 16, 16, 14, 10, 12, 12, 14, 16, 10, 12, 10, 12, 24),
+    )
+    return _xlsx_response(content, "stock-items.xlsx")
+
+
 @app.route("/api/lookup")
 def api_lookup():
     """Resolve a scanned barcode: a tracked unit (S/N or EAM) or an item (SKU)."""
@@ -3164,14 +3754,15 @@ def api_lookup():
         return jsonify({"error": "empty code"}), 400
     conn = database.get_db()
     unit = conn.execute(
-        """SELECT u.id AS unit_id, u.status, u.serial_no, u.eam_no, u.on_loan, u.condemned,
-                  i.id, i.name, i.sku, i.category,
-                  (SELECT t.person FROM transactions t
-                   WHERE t.unit_id = u.id AND t.type = 'OUT'
-                   ORDER BY t.created_at DESC, t.id DESC LIMIT 1) AS holder
-           FROM units u JOIN items i ON i.id = u.item_id
-           WHERE u.eam_no = ? COLLATE NOCASE OR u.serial_no = ? COLLATE NOCASE
-           LIMIT 1""",
+        f"""SELECT u.id AS unit_id, u.status, u.serial_no, u.eam_no, u.on_loan, u.condemned,
+                   i.id, i.name, i.sku, i.category,
+                   (SELECT t.person FROM transactions t
+                    WHERE t.unit_id = u.id AND t.type = 'OUT'
+                    ORDER BY t.created_at DESC, t.id DESC LIMIT 1) AS holder
+            FROM units u JOIN items i ON i.id = u.item_id
+            WHERE {UNIT_ACTIVE_SQL} AND {ITEM_ACTIVE_SQL}
+              AND (u.eam_no = ? COLLATE NOCASE OR u.serial_no = ? COLLATE NOCASE)
+            LIMIT 1""",
         (code, code),
     ).fetchone()
     if unit is not None:
@@ -3181,7 +3772,7 @@ def api_lookup():
         return jsonify({"type": "unit", **row})
     item = conn.execute(
         f"""SELECT i.id, i.name, i.sku, i.category, i.quantity, {UNITS_IN_SQL} AS units_in
-            FROM items i WHERE i.sku = ? COLLATE NOCASE LIMIT 1""",
+            FROM items i WHERE i.sku = ? COLLATE NOCASE AND {ITEM_ACTIVE_SQL} LIMIT 1""",
         (code,),
     ).fetchone()
     if item is not None:
@@ -3197,7 +3788,8 @@ def api_items():
             f"""SELECT i.id, i.name, i.sku, i.category, i.brand, i.model,
                        i.quantity AS untagged, i.min_quantity, i.location,
                        {UNITS_IN_SQL} AS tracked_in, {UNITS_OUT_SQL} AS tracked_out
-                FROM items i ORDER BY i.name COLLATE NOCASE"""
+                FROM items i WHERE {ITEM_ACTIVE_SQL}
+                ORDER BY i.name COLLATE NOCASE"""
         ).fetchall()
         return jsonify([dict(r) for r in rows])
 
@@ -3232,8 +3824,9 @@ def api_items():
     if not category:
         return jsonify({"error": "Item category is required."}), 400
     existing = conn.execute(
-        """SELECT id, name, sku, category, brand, model, quantity FROM items
-           WHERE name = ? COLLATE NOCASE AND category = ? COLLATE NOCASE""",
+        f"""SELECT id, name, sku, category, brand, model, quantity FROM items
+            WHERE name = ? COLLATE NOCASE AND category = ? COLLATE NOCASE
+              AND {ITEM_ACTIVE_WHERE}""",
         (name, category),
     ).fetchone()
     if existing is not None:
@@ -3275,11 +3868,13 @@ def api_items():
 def api_summary():
     conn = database.get_db()
     totals = conn.execute(
-        "SELECT COUNT(*) AS items, COALESCE(SUM(quantity), 0) AS units FROM items"
+        f"""SELECT COUNT(*) AS items, COALESCE(SUM(quantity), 0) AS units
+            FROM items WHERE {ITEM_ACTIVE_WHERE}"""
     ).fetchone()
     low = conn.execute(
-        """SELECT COUNT(*) AS c FROM items
-           WHERE min_quantity > 0 AND quantity <= min_quantity"""
+        f"""SELECT COUNT(*) AS c FROM items
+            WHERE {ITEM_ACTIVE_WHERE}
+              AND min_quantity > 0 AND quantity <= min_quantity"""
     ).fetchone()["c"]
     return jsonify(
         {

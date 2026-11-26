@@ -88,6 +88,22 @@
     </main>
   </div>
 </div>
+<div class="modal-backdrop" id="justify-delete-modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="justify-delete-title">
+    <h2 id="justify-delete-title">Confirm delete</h2>
+    <p class="muted" id="justify-delete-msg"></p>
+    <div class="field">
+      <label for="justify-delete-reason">Justification <span class="req">*</span></label>
+      <textarea class="input" id="justify-delete-reason" rows="3" maxlength="500"
+                placeholder="Why is this being deleted?" required></textarea>
+      <p class="hint" id="justify-delete-error" hidden>Enter a justification to continue.</p>
+    </div>
+    <div class="form-actions modal-actions">
+      <button type="button" class="btn btn-ghost" id="justify-delete-cancel">Cancel</button>
+      <button type="button" class="btn btn-danger-ghost" id="justify-delete-confirm">Delete</button>
+    </div>
+  </div>
+</div>
 <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>

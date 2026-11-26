@@ -38,7 +38,7 @@ An item's *In stock* number is tracked units on the shelf plus untagged stock.
   list on every request and expire after 7 days — removing a login or
   changing a password signs out its other browsers.
 - **Excel import** — upload your asset list (`.xlsx` or CSV) and every row
-  becomes one tracked unit. Columns: **Item, Model, Asset/EAM No., S/N**.
+  becomes one tracked unit. Columns: **Item, Model, Asset/EAM, S/N, Tagged, Quantity**, …
   Items are created automatically from the file — no manual setup. Rows
   already registered are skipped, so re-importing the same file is safe.
 - **Dashboard** — units on the shelf, low-stock alerts, hand-outs this month,
@@ -118,10 +118,10 @@ The **Import** page offers two choices:
 The quickest way to load your storeroom is **Import** in the sidebar:
 
 1. Click **Download Excel template** (or use your own file) — one row per
-   physical unit with a header row: **Item**, **Model**, **Asset/EAM No.**,
-   **S/N**. **Item is the category** (Printer, PC / Laptop, Monitor, …) and
-   **Model is the exact product**; rows with the same Item + Model group
-   under one item in the app. Model and one code column are required.
+   physical unit with header order: **Item**, **Model**, **Asset/EAM**,
+   **S/N**, **Tagged**, **Quantity**, **Brand**, **Funding**, **Project**,
+   **Project Code**, **Site**. **Item is the category** and **Model is the
+   product**; rows with the same Item + Model group under one item.
 2. Upload the `.xlsx` (or a CSV with the same columns). Every row becomes a
    unit *on the shelf*.
 3. The result report shows each row as **Imported**, **Skipped** (code already

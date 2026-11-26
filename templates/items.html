@@ -3,6 +3,7 @@
 {% block heading %}Items{% endblock %}
 {% block actions %}
   <a class="btn btn-ghost" href="{{ url_for('items_csv') }}">Export CSV</a>
+  <a class="btn btn-ghost" href="{{ url_for('items_xlsx') }}">Export Excel</a>
   <a class="btn btn-primary" href="{{ url_for('import_stocks') }}">Import from Excel</a>
 {% endblock %}
 {% block content %}
@@ -52,8 +53,11 @@
           <div class="row-actions">
             <a class="btn btn-sm btn-ghost" href="{{ url_for('stock_in', item_id=it["id"]) }}">In</a>
             <a class="btn btn-sm btn-ghost" href="{{ url_for('stock_out', item_id=it["id"]) }}">Out</a>
-            <form method="post" action="{{ url_for('delete_item', item_id=it["id"]) }}" data-confirm="Delete “{{ it['name'] }}” and all of its transaction history?">
+            <form method="post" action="{{ url_for('delete_item', item_id=it['id']) }}"
+                  class="delete-reason-form"
+                  data-justify-delete="Delete “{{ it['name'] }}”? Past movements stay in History under a delete ticket.">
               <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <input type="hidden" name="justification" value="">
               <button class="btn btn-sm btn-danger-ghost" type="submit">Delete</button>
             </form>
           </div>

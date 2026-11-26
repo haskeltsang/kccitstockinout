@@ -2,6 +2,13 @@
 {% block title %}{{ ticket["ticket_no"] }}{% endblock %}
 {% block heading %}{{ ticket["ticket_no"] }}{% endblock %}
 {% block actions %}
+  {% if can_restore %}
+  <form method="post" action="{{ url_for('restore_ticket_delete', ticket_id=ticket['id']) }}"
+        data-confirm="Restore the deleted item(s) / unit(s) from this ticket? They will show in Items again.">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <button class="btn btn-primary" type="submit">Restore</button>
+  </form>
+  {% endif %}
   <a class="btn btn-ghost" href="{{ url_for('tickets') }}">All tickets</a>
 {% endblock %}
 {% block content %}
@@ -9,7 +16,10 @@
   <section class="card">
     <div class="card-head">
       <h2>Case details</h2>
-      <span class="pill {{ 'pill-in' if ticket['type'] == 'IN' else 'pill-out' }}">{{ 'Stock in' if ticket['type'] == 'IN' else 'Stock out' }}</span>
+      {% if ticket["type"] == "IN" %}<span class="pill pill-in">Stock in</span>
+      {% elif ticket["type"] == "OUT" %}<span class="pill pill-out">Stock out</span>
+      {% elif ticket["type"] == "DELETE" %}<span class="pill pill-delete">Delete</span>
+      {% else %}<span class="pill">{{ ticket["type"] }}</span>{% endif %}
       {% if ticket["on_loan"] %}<span class="pill pill-loan">On loan</span>{% endif %}
       {% if ticket["condemned"] %}<span class="pill pill-condemn">Condemned</span>{% endif %}
       {% if ticket["follow_up"] %}<span class="pill pill-followup">Follow up</span>{% endif %}
@@ -18,32 +28,40 @@
       <div><dt>Ticket no.</dt><dd class="mono">{{ ticket["ticket_no"] }}</dd></div>
       <div><dt>Recorded</dt><dd>{{ ticket["created_at"] }}</dd></div>
       <div><dt>Recorded by</dt><dd>{{ ticket["created_by"] or '—' }}</dd></div>
-      <div><dt>{{ 'Supplier / source' if ticket['type'] == 'IN' else 'Custodian' }}</dt><dd>{{ ticket["person"] or '—' }}</dd></div>
-      {% if ticket["type"] == "OUT" %}
+      {% if ticket["type"] == "IN" %}
+      <div><dt>Supplier / source</dt><dd>{{ ticket["person"] or '—' }}</dd></div>
+      {% elif ticket["type"] == "OUT" %}
+      <div><dt>Custodian</dt><dd>{{ ticket["person"] or '—' }}</dd></div>
       <div><dt>Department</dt><dd>{{ ticket["department"] or '—' }}</dd></div>
       <div><dt>Staff ID</dt><dd class="mono">{{ ticket["staff_id"] or '—' }}</dd></div>
+      {% else %}
+      <div><dt>Recorded as</dt><dd>{{ ticket["person"] or ticket["created_by"] or '—' }}</dd></div>
       {% endif %}
       <div><dt>Site</dt><dd>{{ ticket["site"] or '—' }}</dd></div>
-      {% if ticket["notes"] %}<div><dt>Notes</dt><dd>{{ ticket["notes"] }}</dd></div>{% endif %}
+      {% if ticket["notes"] %}<div><dt>{% if ticket["type"] == "DELETE" %}Justification / notes{% else %}Notes{% endif %}</dt><dd>{{ ticket["notes"] }}</dd></div>{% endif %}
     </dl>
   </section>
   <div class="stat-col">
     <div class="card stat">
       <span class="stat-label">Line items</span>
       <span class="stat-value">{{ lines|length }}</span>
-      <span class="stat-sub">products on this ticket</span>
+      <span class="stat-sub">{% if ticket["type"] == "DELETE" %}deleted on this ticket{% else %}products on this ticket{% endif %}</span>
     </div>
     <div class="card stat">
-      <span class="stat-label">Units moved</span>
+      <span class="stat-label">{% if ticket["type"] == "DELETE" %}Qty removed{% else %}Units moved{% endif %}</span>
       <span class="stat-value">{{ unit_total }}</span>
-      <span class="stat-sub">{{ 'into' if ticket['type'] == 'IN' else 'out of' }} stock</span>
+      <span class="stat-sub">
+        {% if ticket["type"] == "IN" %}into stock
+        {% elif ticket["type"] == "OUT" %}out of stock
+        {% else %}from catalog / shelf{% endif %}
+      </span>
     </div>
   </div>
 </div>
 
 <section class="card table-card">
   <div class="card-head">
-    <h2>Items on this ticket</h2>
+    <h2>{% if ticket["type"] == "DELETE" %}Deleted items{% else %}Items on this ticket{% endif %}</h2>
   </div>
   {% if lines %}
   <table class="table">
@@ -56,16 +74,20 @@
       {% for line in lines %}
       <tr>
         <td>
-          {% if line["item_id"] %}
+          {% if line["item_id"] and not can_restore %}
           <a class="item-name" href="{{ url_for('item_detail', item_id=line['item_id']) }}">{{ line["item_name"] or '—' }}</a>
           {% else %}
-          <span class="muted">{{ line["item_name"] or '—' }}</span>
+          <span class="muted">{{ line["item_name"] or '—' }}{% if can_restore %} (deleted){% endif %}</span>
           {% endif %}
         </td>
         <td class="mono">{{ line["item_sku"] or '—' }}</td>
         <td class="mono">{{ line["unit_eam"] or '—' }}</td>
         <td class="mono">{{ line["unit_serial"] or '—' }}</td>
-        <td class="num"><span class="{{ 'qty-in' if ticket['type'] == 'IN' else 'qty-out' }}">{{ '+' if ticket['type'] == 'IN' else '−' }}{{ line["quantity"] }}</span></td>
+        <td class="num">
+          {% if ticket["type"] == "IN" %}<span class="qty-in">+{{ line["quantity"] }}</span>
+          {% elif ticket["type"] == "OUT" %}<span class="qty-out">−{{ line["quantity"] }}</span>
+          {% else %}<span class="muted">{{ line["quantity"] }}</span>{% endif %}
+        </td>
       </tr>
       {% endfor %}
     </tbody>
