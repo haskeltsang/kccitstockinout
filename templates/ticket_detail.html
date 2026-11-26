@@ -55,7 +55,13 @@
     <tbody>
       {% for line in lines %}
       <tr>
-        <td><a class="item-name" href="{{ url_for('item_detail', item_id=line['item_id']) }}">{{ line["item_name"] }}</a></td>
+        <td>
+          {% if line["item_id"] %}
+          <a class="item-name" href="{{ url_for('item_detail', item_id=line['item_id']) }}">{{ line["item_name"] or '—' }}</a>
+          {% else %}
+          <span class="muted">{{ line["item_name"] or '—' }}</span>
+          {% endif %}
+        </td>
         <td class="mono">{{ line["item_sku"] or '—' }}</td>
         <td class="mono">{{ line["unit_eam"] or '—' }}</td>
         <td class="mono">{{ line["unit_serial"] or '—' }}</td>

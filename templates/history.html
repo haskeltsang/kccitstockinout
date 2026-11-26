@@ -8,12 +8,14 @@
 <form class="toolbar" method="get" action="{{ url_for('history') }}">
   <div class="search">
     <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m15.5 15.5 4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-    <input class="input" type="search" name="q" value="{{ q }}" placeholder="Search EAM, S/N, item, person, staff ID, department, reference…">
+    <input class="input" type="search" name="q" value="{{ q }}" placeholder="Search EAM, S/N, item, person, notes, reference…">
   </div>
   <select class="input" name="type">
     <option value="" {{ 'selected' if not tx_type }}>All types</option>
     <option value="IN" {{ 'selected' if tx_type == 'IN' }}>Stock in</option>
     <option value="OUT" {{ 'selected' if tx_type == 'OUT' }}>Stock out</option>
+    <option value="DELETE" {{ 'selected' if tx_type == 'DELETE' }}>Delete</option>
+    <option value="EDIT" {{ 'selected' if tx_type == 'EDIT' }}>Edit (date)</option>
   </select>
   <input class="input" type="date" name="date_from" value="{{ date_from }}" aria-label="From date">
   <input class="input" type="date" name="date_to" value="{{ date_to }}" aria-label="To date">
@@ -34,11 +36,30 @@
       {% for t in rows %}
       <tr>
         <td class="nowrap">{{ t["created_at"] }}</td>
-        <td><span class="pill {{ 'pill-in' if t["type"] == 'IN' else 'pill-out' }}">{{ 'In' if t["type"] == 'IN' else 'Out' }}</span>{% if t["on_loan"] %}<span class="pill pill-loan">On loan</span>{% endif %}{% if t["condemned"] %}<span class="pill pill-condemn">Condemned</span>{% endif %}{% if t["follow_up"] %}<span class="pill pill-followup">Follow up</span>{% endif %}</td>
-        <td><a class="item-name" href="{{ url_for('item_detail', item_id=t["item_id"]) }}">{{ t["item_name"] }}</a></td>
+        <td>
+          {% if t["type"] == "IN" %}<span class="pill pill-in">In</span>
+          {% elif t["type"] == "OUT" %}<span class="pill pill-out">Out</span>
+          {% elif t["type"] == "DELETE" %}<span class="pill pill-delete">Delete</span>
+          {% elif t["type"] == "EDIT" %}<span class="pill pill-edit">Edit</span>
+          {% else %}<span class="pill">{{ t["type"] }}</span>{% endif %}
+          {% if t["on_loan"] %}<span class="pill pill-loan">On loan</span>{% endif %}
+          {% if t["condemned"] %}<span class="pill pill-condemn">Condemned</span>{% endif %}
+          {% if t["follow_up"] %}<span class="pill pill-followup">Follow up</span>{% endif %}
+        </td>
+        <td>
+          {% if t["item_id"] %}
+          <a class="item-name" href="{{ url_for('item_detail', item_id=t['item_id']) }}">{{ t["item_name"] or '—' }}</a>
+          {% else %}
+          <span class="muted">{{ t["item_name"] or '—' }}</span>
+          {% endif %}
+        </td>
         <td class="mono">{{ t["unit_eam"] or '—' }}</td>
         <td class="mono">{{ t["unit_serial"] or '—' }}</td>
-        <td class="num"><span class="{{ 'qty-in' if t["type"] == 'IN' else 'qty-out' }}">{{ '+' if t["type"] == 'IN' else '−' }}{{ t["quantity"] }}</span></td>
+        <td class="num">
+          {% if t["type"] == "IN" %}<span class="qty-in">+{{ t["quantity"] }}</span>
+          {% elif t["type"] == "OUT" %}<span class="qty-out">−{{ t["quantity"] }}</span>
+          {% else %}<span class="muted">{{ t["quantity"] }}</span>{% endif %}
+        </td>
         <td>{{ t["person"] or '—' }}</td>
         <td>{{ t["department"] or '—' }}</td>
         <td class="mono">{% if t["reference"] and t["reference"].startswith("KCCITD-") %}<a class="item-name" href="{{ url_for('ticket_by_no', ticket_no=t['reference']) }}">{{ t["reference"] }}</a>{% else %}{{ t["reference"] or '—' }}{% endif %}</td>

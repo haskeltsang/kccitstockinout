@@ -41,7 +41,6 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
 import db as database
-from db import PRESET_CATEGORIES
 
 DEFAULT_PORT = 8077
 PAGE_SIZE = 50
@@ -158,6 +157,73 @@ def now_str():
     return datetime.now().strftime("%Y-%m-%d %H:%M")
 
 
+def item_display_name(brand="", model="", name="", fallback=""):
+    """Brand + model for lists (History / Tickets / Dashboard). Falls back to name."""
+    brand = (brand or "").strip()
+    model = (model or "").strip()
+    name = (name or "").strip()
+    fallback = (fallback or "").strip()
+    core = model or name or fallback
+    if brand and core:
+        if core.lower().startswith(brand.lower() + " ") or core.lower() == brand.lower():
+            return core
+        return f"{brand} {core}"
+    return core or brand
+
+
+# SQL expression: brand + model from joined items i, else t.item_name snapshot.
+ITEM_LABEL_SQL = """TRIM(
+  CASE
+    WHEN TRIM(COALESCE(i.brand, '')) != ''
+     AND TRIM(COALESCE(NULLIF(i.model, ''), NULLIF(i.name, ''), '')) != ''
+      THEN TRIM(i.brand) || ' ' || TRIM(COALESCE(NULLIF(i.model, ''), i.name))
+    WHEN TRIM(COALESCE(NULLIF(i.model, ''), NULLIF(i.name, ''), '')) != ''
+      THEN TRIM(COALESCE(NULLIF(i.model, ''), i.name))
+    ELSE TRIM(COALESCE(t.item_name, ''))
+  END
+)"""
+# Never SELECT t.* alongside AS item_name — sqlite3.Row keeps the first
+# item_name (often the empty snapshot) and templates show "—".
+TX_SELECT = """t.id, t.item_id, t.unit_id, t.type, t.quantity, t.person, t.department,
+               t.reference, t.staff_id, t.site, t.on_loan, t.condemned, t.follow_up,
+               t.notes, t.created_at"""
+
+
+def _item_label_for_id(conn, item_id, fallback=""):
+    if not item_id:
+        return (fallback or "").strip()
+    row = conn.execute(
+        "SELECT brand, model, name FROM items WHERE id = ?", (item_id,)
+    ).fetchone()
+    if row is None:
+        return (fallback or "").strip()
+    return item_display_name(
+        brand=row["brand"], model=row["model"], name=row["name"], fallback=fallback,
+    )
+
+
+def log_tx(conn, *, tx_type, item_id=None, unit_id=None, quantity=1,
+           person="", department="", reference="", staff_id="", site="",
+           notes="", item_name="", created_at=None):
+    """Insert a history row (stock IN/OUT or audit DELETE/EDIT)."""
+    if tx_type not in ("IN", "OUT", "DELETE", "EDIT"):
+        raise ValueError(f"Unknown transaction type: {tx_type}")
+    name = (item_name or "").strip()
+    if not name and item_id:
+        name = _item_label_for_id(conn, item_id)
+    conn.execute(
+        """INSERT INTO transactions
+           (item_id, unit_id, type, quantity, person, department, reference,
+            staff_id, site, notes, item_name, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            item_id, unit_id, tx_type, max(1, int(quantity or 1)),
+            person, department, reference, staff_id, site, notes, name,
+            created_at or now_str(),
+        ),
+    )
+
+
 def parse_stocked_in(raw):
     """Parse a stocked-in date/time from a form. Returns 'YYYY-MM-DD HH:MM' or None."""
     text = (raw or "").strip().replace("T", " ")
@@ -260,17 +326,18 @@ def history_filters(args):
     q = args.get("q", "").strip()
     date_from = args.get("date_from", "").strip()
     date_to = args.get("date_to", "").strip()
-    if tx_type in ("IN", "OUT"):
+    if tx_type in ("IN", "OUT", "DELETE", "EDIT"):
         clauses.append("t.type = ?")
         params.append(tx_type)
     if q:
         like = f"%{q}%"
         clauses.append(
-            "(i.name LIKE ? OR i.sku LIKE ? OR t.person LIKE ? OR t.staff_id LIKE ? "
-            "OR t.department LIKE ? OR t.reference LIKE ? OR t.site LIKE ? "
-            "OR u.eam_no LIKE ? OR u.serial_no LIKE ?)"
+            f"({ITEM_LABEL_SQL} LIKE ? OR i.brand LIKE ? OR i.model LIKE ? OR i.name LIKE ? "
+            "OR t.item_name LIKE ? OR i.sku LIKE ? OR t.person LIKE ? "
+            "OR t.staff_id LIKE ? OR t.department LIKE ? OR t.reference LIKE ? "
+            "OR t.site LIKE ? OR t.notes LIKE ? OR u.eam_no LIKE ? OR u.serial_no LIKE ?)"
         )
-        params += [like] * 9
+        params += [like] * 14
     if date_from:
         clauses.append("t.created_at >= ?")
         params.append(date_from + " 00:00")
@@ -552,11 +619,13 @@ def dashboard():
         (month_prefix,),
     ).fetchone()
     recent = conn.execute(
-        """SELECT t.*, i.name AS item_name, u.eam_no AS unit_eam, u.serial_no AS unit_serial
-           FROM transactions t
-           JOIN items i ON i.id = t.item_id
-           LEFT JOIN units u ON u.id = t.unit_id
-           ORDER BY t.created_at DESC, t.id DESC LIMIT 9"""
+        f"""SELECT {TX_SELECT},
+                   {ITEM_LABEL_SQL} AS item_name,
+                   u.eam_no AS unit_eam, u.serial_no AS unit_serial
+            FROM transactions t
+            LEFT JOIN items i ON i.id = t.item_id
+            LEFT JOIN units u ON u.id = t.unit_id
+            ORDER BY t.created_at DESC, t.id DESC LIMIT 9"""
     ).fetchall()
     cat_rows = conn.execute(
         """SELECT category, COUNT(*) AS items, COALESCE(SUM(quantity), 0) AS bulk
@@ -721,15 +790,6 @@ def item_detail(item_id):
         if not any(u["id"] == highlight_unit_id for u in units):
             highlight_unit_id = None
     sku = (item["sku"] or "").upper()
-    merge_candidates = conn.execute(
-        f"""SELECT i.id, i.name, i.category, i.model, i.sku, i.quantity,
-                   {UNITS_IN_SQL} AS units_in, {UNITS_OUT_SQL} AS units_out
-            FROM items i
-            WHERE i.id <> ?
-              AND (i.sku = '' OR UPPER(i.sku) NOT IN ({",".join("?" * len(ACCESSORY_SKUS))}))
-            ORDER BY i.category COLLATE NOCASE, i.name COLLATE NOCASE""",
-        (item_id, *sorted(ACCESSORY_SKUS)),
-    ).fetchall()
     return render_template(
         "item_detail.html",
         item=item,
@@ -739,13 +799,112 @@ def item_detail(item_id):
         highlight_unit_id=highlight_unit_id,
         categories=_stock_in_categories(conn),
         is_fixed_accessory=sku in ACCESSORY_SKUS,
-        merge_candidates=merge_candidates,
     )
+
+
+def _merge_items(conn, target, source):
+    """Absorb source into target. Caller commits. Returns moved summary text.
+
+    Raises ValueError when the merge is not allowed.
+    """
+    target_id = target["id"]
+    source_id = source["id"]
+    if source_id == target_id:
+        raise ValueError("Choose a different product to merge into this one.")
+
+    src_sku = (source["sku"] or "").upper()
+    tgt_sku = (target["sku"] or "").upper()
+    if src_sku in ACCESSORY_SKUS:
+        raise ValueError(
+            f"“{source['name']}” is a fixed accessory ({src_sku}) and can’t be "
+            "merged away. Merge the typo product into the accessory instead."
+        )
+    if tgt_sku in ACCESSORY_SKUS and src_sku and src_sku != tgt_sku:
+        raise ValueError(
+            "Can’t merge a product that has a different SKU into a fixed accessory."
+        )
+    if src_sku and tgt_sku and src_sku != tgt_sku:
+        raise ValueError(
+            f"Both products have SKUs ({src_sku} vs {tgt_sku}) — merge is blocked "
+            "so codes aren’t mixed. Clear one SKU first if they really are the same."
+        )
+
+    units_n = conn.execute(
+        "SELECT COUNT(*) AS c FROM units WHERE item_id = ?", (source_id,)
+    ).fetchone()["c"]
+    qty = int(source["quantity"] or 0)
+    now = now_str()
+    conn.execute(
+        "UPDATE units SET item_id = ?, updated_at = ? WHERE item_id = ?",
+        (target_id, now, source_id),
+    )
+    conn.execute(
+        "UPDATE transactions SET item_id = ? WHERE item_id = ?",
+        (target_id, source_id),
+    )
+    if qty:
+        conn.execute(
+            "UPDATE items SET quantity = quantity + ?, updated_at = ? WHERE id = ?",
+            (qty, now, target_id),
+        )
+    patches = []
+    params = []
+    for col in ("brand", "location", "notes"):
+        if not (target[col] or "").strip() and (source[col] or "").strip():
+            patches.append(f"{col} = ?")
+            params.append(source[col].strip())
+    if not tgt_sku and src_sku:
+        patches.append("sku = ?")
+        params.append(source["sku"])
+    if target["min_quantity"] == 0 and source["min_quantity"]:
+        patches.append("min_quantity = ?")
+        params.append(source["min_quantity"])
+    if patches:
+        params.extend([now, target_id])
+        conn.execute(
+            f"UPDATE items SET {', '.join(patches)}, updated_at = ? WHERE id = ?",
+            params,
+        )
+    else:
+        conn.execute(
+            "UPDATE items SET updated_at = ? WHERE id = ?", (now, target_id)
+        )
+    conn.execute(
+        """UPDATE package_lines SET match_value = ?
+           WHERE match_type = 'item' AND match_value = ?""",
+        (str(target_id), str(source_id)),
+    )
+    src_cat = (source["category"] or "").strip()
+    tgt_cat = (target["category"] or "").strip()
+    if src_cat and tgt_cat and src_cat.lower() != tgt_cat.lower():
+        still = conn.execute(
+            """SELECT 1 FROM items
+               WHERE id <> ? AND category = ? COLLATE NOCASE LIMIT 1""",
+            (source_id, src_cat),
+        ).fetchone()
+        if still is None:
+            conn.execute(
+                """UPDATE package_lines SET match_value = ?
+                   WHERE match_type = 'category' AND match_value = ? COLLATE NOCASE""",
+                (tgt_cat, src_cat),
+            )
+    conn.execute("DELETE FROM items WHERE id = ?", (source_id,))
+
+    bits = []
+    if qty:
+        bits.append(f"{qty} untagged")
+    if units_n:
+        bits.append(f"{units_n} unit{'s' if units_n != 1 else ''}")
+    return ", ".join(bits) if bits else "no stock"
 
 
 @app.route("/items/<int:item_id>/edit", methods=["POST"])
 def edit_item(item_id):
-    """Update catalog category and model (display name follows model)."""
+    """Update catalog category and model (display name follows model).
+
+    If another product already has that category + model (e.g. this row was
+    imported as Other by mistake), merge this product into the existing one.
+    """
     item = get_item_or_404(item_id)
     sku = (item["sku"] or "").upper()
     if sku in ACCESSORY_SKUS:
@@ -786,19 +945,32 @@ def edit_item(item_id):
 
     conn = database.get_db()
     clash = conn.execute(
-        """SELECT id, name FROM items
+        """SELECT * FROM items
            WHERE id <> ?
              AND category = ? COLLATE NOCASE
              AND name = ? COLLATE NOCASE""",
         (item_id, category, model),
     ).fetchone()
     if clash is not None:
+        # Same product under a wrong category (e.g. Other) — merge into the
+        # existing Ultra Slim PC / … row instead of blocking the edit.
+        try:
+            moved = _merge_items(conn, clash, item)
+            conn.commit()
+        except ValueError as exc:
+            conn.rollback()
+            flash(str(exc), "error")
+            return redirect(url_for("item_detail", item_id=item_id))
+        except sqlite3.Error:
+            conn.rollback()
+            flash("Could not merge into the existing product. Please try again.", "error")
+            return redirect(url_for("item_detail", item_id=item_id))
         flash(
-            f"Another product already uses category “{category}” and model "
-            f"“{model}”. Pick a different combination.",
-            "error",
+            f"Merged into existing “{category} · {model}” ({moved}). "
+            "Duplicate removed.",
+            "success",
         )
-        return redirect(url_for("item_detail", item_id=item_id))
+        return redirect(url_for("item_detail", item_id=clash["id"]))
 
     # Catalog identity is (category, name); import uses model as the name.
     conn.execute(
@@ -832,129 +1004,6 @@ def set_min_level(item_id):
     return redirect(url_for("item_detail", item_id=item_id))
 
 
-@app.route("/items/<int:item_id>/merge", methods=["POST"])
-def merge_item(item_id):
-    """Merge a duplicate catalog row into this product (typo categories/models).
-
-    Keeps this item’s category / model / SKU. Moves untagged qty, units, and
-    history from the source, updates package item lines, then deletes the source.
-    """
-    target = get_item_or_404(item_id)
-    source_id = form_int(request.form.get("source_id"), default=0)
-    if source_id < 1 or source_id == item_id:
-        flash("Choose a different product to merge into this one.", "error")
-        return redirect(url_for("item_detail", item_id=item_id))
-
-    conn = database.get_db()
-    source = conn.execute("SELECT * FROM items WHERE id = ?", (source_id,)).fetchone()
-    if source is None:
-        flash("That product no longer exists.", "error")
-        return redirect(url_for("item_detail", item_id=item_id))
-
-    src_sku = (source["sku"] or "").upper()
-    tgt_sku = (target["sku"] or "").upper()
-    if src_sku in ACCESSORY_SKUS:
-        flash(
-            f"“{source['name']}” is a fixed accessory ({src_sku}) and can’t be "
-            "merged away. Merge the typo product into the accessory instead.",
-            "error",
-        )
-        return redirect(url_for("item_detail", item_id=item_id))
-    if tgt_sku in ACCESSORY_SKUS and src_sku and src_sku != tgt_sku:
-        flash("Can’t merge a product that has a different SKU into a fixed accessory.", "error")
-        return redirect(url_for("item_detail", item_id=item_id))
-    if src_sku and tgt_sku and src_sku != tgt_sku:
-        flash(
-            f"Both products have SKUs ({src_sku} vs {tgt_sku}) — merge is blocked "
-            "so codes aren’t mixed. Clear one SKU first if they really are the same.",
-            "error",
-        )
-        return redirect(url_for("item_detail", item_id=item_id))
-
-    units_n = conn.execute(
-        "SELECT COUNT(*) AS c FROM units WHERE item_id = ?", (source_id,)
-    ).fetchone()["c"]
-    qty = int(source["quantity"] or 0)
-    now = now_str()
-    try:
-        conn.execute(
-            "UPDATE units SET item_id = ?, updated_at = ? WHERE item_id = ?",
-            (item_id, now, source_id),
-        )
-        conn.execute(
-            "UPDATE transactions SET item_id = ? WHERE item_id = ?",
-            (item_id, source_id),
-        )
-        if qty:
-            conn.execute(
-                "UPDATE items SET quantity = quantity + ?, updated_at = ? WHERE id = ?",
-                (qty, now, item_id),
-            )
-        # Fill blank catalog fields on the keeper from the duplicate.
-        patches = []
-        params = []
-        for col in ("brand", "location", "notes"):
-            if not (target[col] or "").strip() and (source[col] or "").strip():
-                patches.append(f"{col} = ?")
-                params.append(source[col].strip())
-        if not tgt_sku and src_sku:
-            patches.append("sku = ?")
-            params.append(source["sku"])
-        if target["min_quantity"] == 0 and source["min_quantity"]:
-            patches.append("min_quantity = ?")
-            params.append(source["min_quantity"])
-        if patches:
-            params.extend([now, item_id])
-            conn.execute(
-                f"UPDATE items SET {', '.join(patches)}, updated_at = ? WHERE id = ?",
-                params,
-            )
-        else:
-            conn.execute(
-                "UPDATE items SET updated_at = ? WHERE id = ?", (now, item_id)
-            )
-        # Package lines pointing at the duplicate item id.
-        conn.execute(
-            """UPDATE package_lines SET match_value = ?
-               WHERE match_type = 'item' AND match_value = ?""",
-            (str(item_id), str(source_id)),
-        )
-        # Category-based package lines that only referred to the typo category.
-        src_cat = (source["category"] or "").strip()
-        tgt_cat = (target["category"] or "").strip()
-        if src_cat and tgt_cat and src_cat.lower() != tgt_cat.lower():
-            still = conn.execute(
-                """SELECT 1 FROM items
-                   WHERE id <> ? AND category = ? COLLATE NOCASE LIMIT 1""",
-                (source_id, src_cat),
-            ).fetchone()
-            if still is None:
-                conn.execute(
-                    """UPDATE package_lines SET match_value = ?
-                       WHERE match_type = 'category' AND match_value = ? COLLATE NOCASE""",
-                    (tgt_cat, src_cat),
-                )
-        conn.execute("DELETE FROM items WHERE id = ?", (source_id,))
-        conn.commit()
-    except sqlite3.Error:
-        conn.rollback()
-        flash("Could not merge the products. Please try again.", "error")
-        return redirect(url_for("item_detail", item_id=item_id))
-
-    bits = []
-    if qty:
-        bits.append(f"{qty} untagged")
-    if units_n:
-        bits.append(f"{units_n} unit{'s' if units_n != 1 else ''}")
-    moved = ", ".join(bits) if bits else "no stock"
-    flash(
-        f"Merged “{source['category']} · {source['name']}” into this product "
-        f"({moved}). Duplicate removed.",
-        "success",
-    )
-    return redirect(url_for("item_detail", item_id=item_id))
-
-
 @app.route("/items/<int:item_id>/delete", methods=["POST"])
 def delete_item(item_id):
     conn = database.get_db()
@@ -966,9 +1015,38 @@ def delete_item(item_id):
             "error",
         )
         return redirect(url_for("item_detail", item_id=item_id))
+    units_n = conn.execute(
+        "SELECT COUNT(*) AS c FROM units WHERE item_id = ?", (item_id,)
+    ).fetchone()["c"]
+    qty = int(item["quantity"] or 0)
+    detail = []
+    if qty:
+        detail.append(f"{qty} untagged")
+    if units_n:
+        detail.append(f"{units_n} unit{'s' if units_n != 1 else ''}")
+    stock_bit = f" ({', '.join(detail)} on hand)" if detail else ""
+    # Snapshot brand+model on existing rows, then log DELETE, then remove the item
+    # (item_id becomes NULL — history keeps item_name).
+    label = item_display_name(
+        brand=item["brand"], model=item["model"], name=item["name"],
+    )
+    conn.execute(
+        """UPDATE transactions SET item_name = ?
+           WHERE item_id = ? AND (item_name = '' OR item_name IS NULL)""",
+        (label, item_id),
+    )
+    log_tx(
+        conn,
+        tx_type="DELETE",
+        item_id=item_id,
+        item_name=label,
+        quantity=max(1, qty + units_n),
+        person=session.get("username", ""),
+        notes=f"Deleted product “{label}” ({item['category']}){stock_bit}",
+    )
     conn.execute("DELETE FROM items WHERE id = ?", (item_id,))
     conn.commit()
-    flash(f"Deleted “{item['name']}” and its transaction history.", "success")
+    flash(f"Deleted “{item['name']}”. The delete is recorded in History.", "success")
     return redirect(url_for("items"))
 
 
@@ -978,7 +1056,7 @@ def delete_item(item_id):
 
 IMPORT_ALIASES = {
     "item": {"item", "item name", "product", "product name", "equipment", "name", "description"},
-    "model": {"model", "model no", "model name", "model number"},
+    "model": {"model", "model no", "model name", "model number", "model/type"},
     "eam": {
         "asset/eam no", "asset/eam no.", "asset eam no", "asset no", "asset no.",
         "asset number", "asset tag", "asset id", "asset", "eam", "eam no",
@@ -998,7 +1076,9 @@ IMPORT_ALIASES = {
     },
 }
 
-# Suggested Item values in the Excel template (users may also type their own).
+# Canonical item categories — Excel template Item dropdown, Stock In / item edit
+# category lists, and package category options all use this order. Users may
+# still type a custom category (Other / free text) where the UI allows it.
 IMPORT_ITEM_CHOICES = (
     "OA PC",
     "Ultra Slim PC",
@@ -1011,9 +1091,16 @@ IMPORT_ITEM_CHOICES = (
     "Mouse (Wired)",
     "Mouse (Wireless)",
     "LAN Cable (3 Metres)",
+    "Cable",
+    "Speaker",
+    "Headset",
+    "Webcam",
+    "Printer",
+    "Storage",
+    "Accessory"
 )
 
-# Stock In “new product” category list (order kept in the dropdown).
+# Stock In / item-edit category list (same as Excel Item column).
 STOCK_IN_CATEGORY_CHOICES = IMPORT_ITEM_CHOICES
 
 # The two storerooms stock can be received into. Forms offer exactly these;
@@ -1028,7 +1115,7 @@ def site_for(raw):
 
 
 IMPORT_TEMPLATE_HEADERS = [
-    "Item", "Model", "Tagged", "S/N", "Asset/EAM No.", "Quantity",
+    "Item", "Model/Type", "Tagged", "S/N", "Asset/EAM No.", "Quantity",
     "Brand", "Funding", "Project", "Project Code", "Site",
 ]
 # Example rows shipped in the Excel/CSV template (delete or replace when importing).
@@ -1064,14 +1151,22 @@ def _record_setup_fail():
         _setup_fails["count"] = 0
 
 # The Item column in the Excel file is the category. Common spellings map onto
-# the preset categories; anything else is kept as typed (blank -> "Other").
-CATEGORY_ALIASES = {c.lower(): c for c in PRESET_CATEGORIES}
+# IMPORT_ITEM_CHOICES; anything else is kept as typed (blank -> "Other").
+CATEGORY_ALIASES = {c.lower(): c for c in IMPORT_ITEM_CHOICES}
 CATEGORY_ALIASES.update({
-    "pc": "PC", "laptop": "Laptop", "notebook": "Laptop",
-    "desktop": "PC", "computer": "PC",
-    "screen": "Monitor", "display": "Monitor", "monitor": "Monitor",
-    "ipad": "iPad", "i-pad": "iPad",
-    "headset": "Peripheral", "webcam": "Peripheral",
+    "pc": "OA PC", "laptop": "Laptop", "notebook": "Laptop",
+    "desktop": "OA PC", "computer": "OA PC", "oa pc": "OA PC", "oapc": "OA PC",
+    "ultra slim": "Ultra Slim PC", "ultraslim pc": "Ultra Slim PC",
+    "screen": "Monitor", "display": "Monitor",
+    "i-pad": "iPad",
+    "keyboard": "Keyboard (Wired)", "keyboards": "Keyboard (Wired)", "kb": "Keyboard (Wired)",
+    "mouse": "Mouse (Wired)", "mice": "Mouse (Wired)", "ms": "Mouse (Wired)",
+    "speaker": "Speaker", "speakers": "Speaker",
+    "headset": "Headset", "headsets": "Headset", "headphones": "Headset",
+    "webcam": "Webcam", "web cam": "Webcam", "webcams": "Webcam",
+    "cable": "Cable", "cables": "Cable",
+    # Legacy catch-all → Accessory (prefer specific IMPORT_ITEM_CHOICES above).
+    "peripheral": "Accessory", "peripherals": "Accessory",
     "router": "Network", "switch": "Network", "access point": "Network",
     "ssd": "Storage", "hdd": "Storage", "hard drive": "Storage", "usb drive": "Storage",
     "hub": "Accessory", "dock": "Accessory", "docking station": "Accessory",
@@ -1170,18 +1265,19 @@ class ImportFileError(Exception):
 
 # Untagged accessories (no EAM/SN) — tracked by quantity only, one item per
 # fixed SKU, added on the Import page. Scan pages move them by SKU code.
-ACCESSORY_CATEGORY = "Peripheral"
+# Each tuple is (display name, sku, catalog category). Category matches the
+# IMPORT_ITEM_CHOICES label (e.g. Mouse (Wired), not a broad "Mouse").
 ACCESSORY_ITEMS = {
-    ("mouse", "wired"): ("Mouse (Wired)", "MS-WIRED"),
-    ("mouse", "wireless"): ("Mouse (Wireless)", "MS-WIRELESS"),
-    ("keyboard", "wired"): ("Keyboard (Wired)", "KB-WIRED"),
-    ("keyboard", "wireless"): ("Keyboard (Wireless)", "KB-WIRELESS"),
-    ("lan_cable", "3m"): ("LAN Cable (3 Metres)", "LAN-3M"),
+    ("mouse", "wired"): ("Mouse (Wired)", "MS-WIRED", "Mouse (Wired)"),
+    ("mouse", "wireless"): ("Mouse (Wireless)", "MS-WIRELESS", "Mouse (Wireless)"),
+    ("keyboard", "wired"): ("Keyboard (Wired)", "KB-WIRED", "Keyboard (Wired)"),
+    ("keyboard", "wireless"): ("Keyboard (Wireless)", "KB-WIRELESS", "Keyboard (Wireless)"),
+    ("lan_cable", "3m"): ("LAN Cable (3 Metres)", "LAN-3M", "LAN Cable (3 Metres)"),
 }
-ACCESSORY_SKUS = {sku for _name, sku in ACCESSORY_ITEMS.values()}
+ACCESSORY_SKUS = {sku for _name, sku, _cat in ACCESSORY_ITEMS.values()}
 # Display label (Mouse (Wired), …) → SKU — package category match uses these.
 ACCESSORY_LABEL_TO_SKU = {
-    name.lower(): sku for name, sku in ACCESSORY_ITEMS.values()
+    name.lower(): sku for name, sku, _cat in ACCESSORY_ITEMS.values()
 }
 # Stock-in category labels → the same (kind, variant) keys as ACCESSORY_ITEMS.
 ACCESSORY_CATEGORY_ALIASES = {
@@ -1230,16 +1326,18 @@ def _ensure_accessory_item(conn, kind, connection, brand="", now=None):
     """Find or create the fixed SKU item for an accessory variant."""
     if (kind, connection) not in ACCESSORY_ITEMS:
         raise ValueError("Unknown accessory type.")
-    name, sku = ACCESSORY_ITEMS[(kind, connection)]
+    name, sku, category = ACCESSORY_ITEMS[(kind, connection)]
     now = now or now_str()
     brand = (brand or "").strip()
     item = conn.execute(
         "SELECT * FROM items WHERE sku = ? COLLATE NOCASE", (sku,)
     ).fetchone()
     if item is None:
+        # Legacy rows used category Peripheral; also try the specific category.
         item = conn.execute(
-            "SELECT * FROM items WHERE category = ? COLLATE NOCASE AND name = ? COLLATE NOCASE",
-            (ACCESSORY_CATEGORY, name),
+            "SELECT * FROM items WHERE name = ? COLLATE NOCASE "
+            "AND (category = ? COLLATE NOCASE OR category = 'Peripheral' COLLATE NOCASE)",
+            (name, category),
         ).fetchone()
     if item is None:
         cur = conn.execute(
@@ -1247,13 +1345,13 @@ def _ensure_accessory_item(conn, kind, connection, brand="", now=None):
                (name, sku, category, brand, model, quantity, min_quantity,
                 location, notes, created_at, updated_at)
                VALUES (?,?,?,?,?,0,0,?,?,?,?)""",
-            (name, sku, ACCESSORY_CATEGORY, brand, name, "", "", now, now),
+            (name, sku, category, brand, name, "", "", now, now),
         )
         return {
             "id": cur.lastrowid,
             "name": name,
             "sku": sku,
-            "category": ACCESSORY_CATEGORY,
+            "category": category,
             "brand": brand,
             "model": name,
             "quantity": 0,
@@ -1265,6 +1363,13 @@ def _ensure_accessory_item(conn, kind, connection, brand="", now=None):
             "UPDATE items SET sku = ?, updated_at = ? WHERE id = ?",
             (sku, now, item_id),
         )
+    if (item["category"] or "").lower() != category.lower():
+        conn.execute(
+            "UPDATE items SET category = ?, updated_at = ? WHERE id = ?",
+            (category, now, item_id),
+        )
+        item = dict(item)
+        item["category"] = category
     if brand and not (item["brand"] or "").strip():
         conn.execute(
             "UPDATE items SET brand = ?, updated_at = ? WHERE id = ?",
@@ -1276,7 +1381,7 @@ def _ensure_accessory_item(conn, kind, connection, brand="", now=None):
         "id": item_id,
         "name": item["name"],
         "sku": item["sku"] or sku,
-        "category": item["category"] or ACCESSORY_CATEGORY,
+        "category": item["category"] or category,
         "brand": item["brand"] or brand,
         "model": item["model"] or name,
         "quantity": item["quantity"],
@@ -1291,15 +1396,16 @@ def _add_accessory_stock(conn, kind, connection, qty, *, reference="", site="Sit
         raise ValueError("Unknown accessory type.")
     if qty < 1 or qty > ACCESSORY_MAX_QTY:
         raise ValueError(f"Quantity must be between 1 and {ACCESSORY_MAX_QTY}.")
-    name, sku = ACCESSORY_ITEMS[(kind, connection)]
+    name, sku, category = ACCESSORY_ITEMS[(kind, connection)]
     now = now or now_str()
     item = conn.execute(
         "SELECT * FROM items WHERE sku = ? COLLATE NOCASE", (sku,)
     ).fetchone()
     if item is None:
         item = conn.execute(
-            "SELECT * FROM items WHERE category = ? COLLATE NOCASE AND name = ? COLLATE NOCASE",
-            (ACCESSORY_CATEGORY, name),
+            "SELECT * FROM items WHERE name = ? COLLATE NOCASE "
+            "AND (category = ? COLLATE NOCASE OR category = 'Peripheral' COLLATE NOCASE)",
+            (name, category),
         ).fetchone()
     if item is None:
         cur = conn.execute(
@@ -1307,7 +1413,7 @@ def _add_accessory_stock(conn, kind, connection, qty, *, reference="", site="Sit
                (name, sku, category, brand, model, quantity, min_quantity,
                 location, notes, created_at, updated_at)
                VALUES (?,?,?,?,?,0,0,?,?,?,?)""",
-            (name, sku, ACCESSORY_CATEGORY, "", name, "", "", now, now),
+            (name, sku, category, "", name, "", "", now, now),
         )
         item_id = cur.lastrowid
     else:
@@ -1316,6 +1422,11 @@ def _add_accessory_stock(conn, kind, connection, qty, *, reference="", site="Sit
             conn.execute(
                 "UPDATE items SET sku = ?, updated_at = ? WHERE id = ?",
                 (sku, now, item_id),
+            )
+        if (item["category"] or "").lower() != category.lower():
+            conn.execute(
+                "UPDATE items SET category = ?, updated_at = ? WHERE id = ?",
+                (category, now, item_id),
             )
     conn.execute(
         "UPDATE items SET quantity = quantity + ?, updated_at = ? WHERE id = ?",
@@ -2089,8 +2200,8 @@ def edit_unit(unit_id):
                project_code = ?, notes = ?, updated_at = ? WHERE id = ?""",
             (serial, eam, site, funding, project, project_code, notes, now_str(), unit_id),
         )
-        # Temporary: allow correcting the stocked-in date shown on Items.
-        if stocked_in:
+        # Correcting the stocked-in date: update the display source and log EDIT.
+        if stocked_in and stocked_in != stocked_in_at:
             in_tx = conn.execute(
                 """SELECT id FROM transactions
                    WHERE unit_id = ? AND type = 'IN'
@@ -2106,6 +2217,18 @@ def edit_unit(unit_id):
                 "UPDATE units SET created_at = ? WHERE id = ?",
                 (stocked_in, unit_id),
             )
+            code = eam or serial or (unit["eam_no"] or unit["serial_no"] or f"#{unit_id}")
+            log_tx(
+                conn,
+                tx_type="EDIT",
+                item_id=unit["item_id"],
+                unit_id=unit_id,
+                person=session.get("username", ""),
+                notes=(
+                    f"Stocked-in date changed from {stocked_in_at or '—'} "
+                    f"to {stocked_in} ({code})"
+                ),
+            )
         conn.commit()
         flash(f"Saved changes to unit {eam or serial}.", "success")
         return redirect(url_for("item_detail", item_id=unit["item_id"]))
@@ -2119,9 +2242,26 @@ def edit_unit(unit_id):
 def delete_unit(unit_id):
     unit = get_unit_or_404(unit_id)
     conn = database.get_db()
+    code = unit["eam_no"] or unit["serial_no"] or f"#{unit_id}"
+    log_tx(
+        conn,
+        tx_type="DELETE",
+        item_id=unit["item_id"],
+        unit_id=unit_id,
+        person=session.get("username", ""),
+        site=unit["site"] or "",
+        notes=(
+            f"Deleted unit {code}"
+            f"{' (condemned)' if unit['condemned'] else ''}"
+            f" — status was {unit['status']}"
+        ),
+    )
     conn.execute("DELETE FROM units WHERE id = ?", (unit_id,))
     conn.commit()
-    flash(f"Deleted unit {unit['eam_no'] or unit['serial_no']}. Its past movements stay in history.", "success")
+    flash(
+        f"Deleted unit {code}. Delete and past movements stay in History.",
+        "success",
+    )
     return redirect(url_for("item_detail", item_id=unit["item_id"]))
 
 
@@ -2131,11 +2271,7 @@ def delete_unit(unit_id):
 
 PACKAGE_MATCH_TYPES = ("category", "sku", "item")
 ACCESSORY_SKU_LABELS = {
-    "MS-WIRED": "Mouse (Wired)",
-    "MS-WIRELESS": "Mouse (Wireless)",
-    "KB-WIRED": "Keyboard (Wired)",
-    "KB-WIRELESS": "Keyboard (Wireless)",
-    "LAN-3M": "LAN Cable (3 Metres)",
+    sku: name for name, sku, _cat in ACCESSORY_ITEMS.values()
 }
 
 
@@ -2178,30 +2314,28 @@ def _packages_payload(conn):
 
 
 def _package_form_options(conn):
-    """Category list for package lines — KB/MS/LAN use the same labels as SKUs."""
-    skip = {
-        "keyboard", "mouse", "lan cable",
-        # Accessories are stored under Peripheral + SKU; package category
-        # match uses the SKU labels (Mouse (Wired), …) instead.
-        ACCESSORY_CATEGORY.lower(),
-    }
-    cats = set()
+    """Category list for package lines — same base list as Excel IMPORT_ITEM_CHOICES."""
+    skip = {"peripheral"}  # legacy broad bucket — no longer offered
+    # Keep Excel template order first, then any extra categories already in use.
+    preferred = [c for c in IMPORT_ITEM_CHOICES if c.lower() not in skip]
+    seen = {c.lower() for c in preferred}
+    extras = []
     for r in conn.execute(
-        "SELECT category, sku, name FROM items WHERE category <> '' OR sku <> ''"
+        "SELECT category, sku FROM items WHERE category <> '' OR sku <> ''"
     ).fetchall():
         sku = (r["sku"] or "").upper()
         if sku in ACCESSORY_SKU_LABELS:
-            cats.add(ACCESSORY_SKU_LABELS[sku])
+            label = ACCESSORY_SKU_LABELS[sku]
+            if label.lower() not in seen:
+                extras.append(label)
+                seen.add(label.lower())
             continue
         c = (r["category"] or "").strip()
-        if c and c.lower() not in skip:
-            cats.add(c)
-    for c in (*IMPORT_ITEM_CHOICES, *PRESET_CATEGORIES):
-        if c.lower() not in skip:
-            cats.add(c)
-    for label in ACCESSORY_SKU_LABELS.values():
-        cats.add(label)
-    categories = sorted(cats, key=lambda s: s.lower())
+        if c and c.lower() not in seen and c.lower() not in skip:
+            extras.append(c)
+            seen.add(c.lower())
+    extras.sort(key=lambda s: s.lower())
+    categories = preferred + extras
     items = conn.execute(
         """SELECT id, name, sku, category FROM items
            WHERE sku = '' OR UPPER(sku) NOT IN ({skus})
@@ -2387,21 +2521,14 @@ def delete_package(package_id):
 # ---------------------------------------------------------------------------
 
 def _stock_in_categories(conn):
-    """Categories offered when registering a new product on Stock In.
+    """Categories for Stock In + item edit — Excel IMPORT_ITEM_CHOICES first.
 
-    Preferred choices (OA PC, KB/MS wired-wireless, LAN Cable 3m, …) come first;
-    any other categories already in the DB follow, excluding the plain
-    Keyboard/Mouse/LAN Cable labels replaced by fixed accessory variants.
+    Any other categories already stored in the DB follow (custom / legacy).
     """
-    preferred = list(STOCK_IN_CATEGORY_CHOICES)
+    preferred = list(IMPORT_ITEM_CHOICES)
     seen = {c.lower() for c in preferred}
-    skip = {"keyboard", "mouse", "lan cable"}
+    skip = {"peripheral"}
     extras = []
-    for c in (*PRESET_CATEGORIES,):
-        if c.lower() in seen or c.lower() in skip:
-            continue
-        extras.append(c)
-        seen.add(c.lower())
     for r in conn.execute(
         "SELECT DISTINCT category FROM items WHERE category <> ''"
     ).fetchall():
@@ -2893,13 +3020,15 @@ def ticket_detail(ticket_id):
     if ticket is None:
         abort(404)
     lines = conn.execute(
-        """SELECT t.*, i.name AS item_name, i.sku AS item_sku, i.category AS item_category,
-                  u.eam_no AS unit_eam, u.serial_no AS unit_serial
-           FROM transactions t
-           JOIN items i ON i.id = t.item_id
-           LEFT JOIN units u ON u.id = t.unit_id
-           WHERE t.reference = ?
-           ORDER BY t.id""",
+        f"""SELECT {TX_SELECT},
+                   {ITEM_LABEL_SQL} AS item_name,
+                   i.sku AS item_sku, i.category AS item_category,
+                   u.eam_no AS unit_eam, u.serial_no AS unit_serial
+            FROM transactions t
+            LEFT JOIN items i ON i.id = t.item_id
+            LEFT JOIN units u ON u.id = t.unit_id
+            WHERE t.reference = ?
+            ORDER BY t.id""",
         (ticket["ticket_no"],),
     ).fetchall()
     unit_total = sum(int(r["quantity"] or 0) for r in lines)
@@ -2932,17 +3061,19 @@ def history():
     conn = database.get_db()
     total = conn.execute(
         f"""SELECT COUNT(*) AS c FROM transactions t
-            JOIN items i ON i.id = t.item_id
+            LEFT JOIN items i ON i.id = t.item_id
             LEFT JOIN units u ON u.id = t.unit_id{where}""",
         params,
     ).fetchone()["c"]
     pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
     page = min(max(1, form_int(request.args.get("page"), default=1)), pages)
     rows = conn.execute(
-        f"""SELECT t.*, i.name AS item_name, i.sku AS item_sku,
+        f"""SELECT {TX_SELECT},
+                   {ITEM_LABEL_SQL} AS item_name,
+                   i.sku AS item_sku,
                    u.eam_no AS unit_eam, u.serial_no AS unit_serial
             FROM transactions t
-            JOIN items i ON i.id = t.item_id
+            LEFT JOIN items i ON i.id = t.item_id
             LEFT JOIN units u ON u.id = t.unit_id{where}
             ORDER BY t.created_at DESC, t.id DESC LIMIT ? OFFSET ?""",
         params + [PAGE_SIZE, (page - 1) * PAGE_SIZE],
@@ -2964,10 +3095,12 @@ def history():
 def history_csv():
     where, params, _tx, _q, _df, _dt = history_filters(request.args)
     rows = database.get_db().execute(
-        f"""SELECT t.*, i.name AS item_name, i.sku AS item_sku,
+        f"""SELECT {TX_SELECT},
+                   {ITEM_LABEL_SQL} AS item_name,
+                   i.sku AS item_sku,
                    u.eam_no AS unit_eam, u.serial_no AS unit_serial
             FROM transactions t
-            JOIN items i ON i.id = t.item_id
+            LEFT JOIN items i ON i.id = t.item_id
             LEFT JOIN units u ON u.id = t.unit_id{where}
             ORDER BY t.created_at DESC, t.id DESC""",
         params,

@@ -26,6 +26,27 @@
     });
   });
 
+  // ---- Dashboard: collapse “Units on the shelf” (+/−) --------------------
+  (function () {
+    var section = document.getElementById("shelf-section");
+    var btn = document.getElementById("shelf-collapse-btn");
+    if (!section || !btn) return;
+    var key = section.getAttribute("data-collapse-key") || "dash-shelf";
+    var apply = function (collapsed) {
+      section.classList.toggle("is-collapsed", collapsed);
+      btn.textContent = collapsed ? "+" : "−";
+      btn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+      btn.title = collapsed ? "Show this section" : "Hide this section";
+      try { localStorage.setItem(key, collapsed ? "1" : "0"); } catch (e) { /* ignore */ }
+    };
+    var saved = null;
+    try { saved = localStorage.getItem(key); } catch (e) { saved = null; }
+    apply(saved === "1");
+    btn.addEventListener("click", function () {
+      apply(!section.classList.contains("is-collapsed"));
+    });
+  })();
+
   // ---- Import page: accessory quantity vs Excel/CSV panels ---------------
   var importModeInputs = document.querySelectorAll("input[name='import_mode']");
   if (importModeInputs.length) {
@@ -610,7 +631,7 @@
     var condemnLabel = condemnToggle.closest("label");
     if (condemnLabel) {
       condemnLabel.title = hasBulk
-        ? "Remove keyboards and mice from this batch to enable condemnation"
+        ? "Remove bulk rows with × (or turn Condemnation on to drop the OA PC kit lines)"
         : loanToggle.checked
           ? "Turn off On loan first — a batch can't be both on loan and condemned"
           : "Write this batch off as condemned — later returns of these units will raise a warning";
@@ -629,6 +650,10 @@
   }
 
   // OA PC / desktop PC stock-outs bring wired KB + MS + 3m LAN cable.
+  // Users can remove those kit lines (needed for Condemnation — units only).
+  var OA_PC_KIT_SKUS = ["KB-WIRED", "MS-WIRED", "LAN-3M"];
+  var skippedOaPcSkus = {};
+
   function isOaPcCategory(cat) {
     var c = (cat || "").toLowerCase().replace(/\s+/g, " ").trim();
     if (!c) return false;
@@ -636,6 +661,31 @@
     if (c === "pc" || c === "oa pc" || c === "oapc") return true;
     if (c === "desktop" || c === "desktop pc" || c === "computer") return true;
     return /^oa[\s-]*pc\b/.test(c);
+  }
+
+  function isOaPcKitSku(sku) {
+    var s = (sku || "").toUpperCase();
+    return OA_PC_KIT_SKUS.indexOf(s) !== -1;
+  }
+
+  function skipOaPcSku(sku) {
+    var s = (sku || "").toUpperCase();
+    if (isOaPcKitSku(s)) skippedOaPcSkus[s] = true;
+  }
+
+  function clearSkipOaPcSku(sku) {
+    var s = (sku || "").toUpperCase();
+    if (s) delete skippedOaPcSkus[s];
+  }
+
+  function stripOaPcKitBulk() {
+    for (var i = entries.length - 1; i >= 0; i--) {
+      var e = entries[i];
+      if (e.kind === "bulk" && (e.autoOaPc || isOaPcKitSku(e.sku))) {
+        skipOaPcSku(e.sku);
+        entries.splice(i, 1);
+      }
+    }
   }
 
   function countOaPcs() {
@@ -655,11 +705,27 @@
     return found;
   }
 
+  function oaPcManualExtra(entry) {
+    if (!entry) return 0;
+    if (typeof entry._oaPcManualExtra === "number") {
+      return Math.max(0, entry._oaPcManualExtra);
+    }
+    var prevAuto = entry._oaPcAutoQty || 0;
+    // Fully manual row (added before any OA PC) → whole count is extra.
+    if (!entry.autoOaPc && !prevAuto) return Math.max(0, entry.count || 0);
+    return Math.max(0, (entry.count || 0) - prevAuto);
+  }
+
   function syncOaPcAccessories() {
     if (!isOut) return;
+    // Condemnation is unit-only — never force KB/MS/LAN onto a condemn batch.
+    if (condemnToggle && condemnToggle.checked) {
+      stripOaPcKitBulk();
+      return;
+    }
     var n = countOaPcs();
     var short = [];
-    ["KB-WIRED", "MS-WIRED", "LAN-3M"].forEach(function (sku) {
+    OA_PC_KIT_SKUS.forEach(function (sku) {
       var meta = accMetaForSku(sku);
       if (!meta) return;
       var itemId = parseInt(meta.getAttribute("data-item-id"), 10);
@@ -670,8 +736,6 @@
       var name = meta.getAttribute("data-name") || sku;
       var category = meta.getAttribute("data-category") || "";
       var stock = parseInt(meta.getAttribute("data-qty"), 10) || 0;
-      var want = Math.min(n, stock);
-      if (n > stock) short.push(sku + " (need " + n + ", have " + stock + ")");
 
       var existing = null;
       var existingIdx = -1;
@@ -682,28 +746,35 @@
         }
       });
 
-      if (want === 0) {
-        // Drop only rows we auto-managed (or that still match the last auto qty).
-        if (existing && (existing.autoOaPc || existing.count === existing._oaPcAutoQty)) {
+      // User removed this kit line (× / − to 0) — leave it out until they add it again.
+      if (skippedOaPcSkus[sku]) {
+        if (existing && existing.autoOaPc && oaPcManualExtra(existing) === 0) {
           entries.splice(existingIdx, 1);
         }
         return;
       }
 
+      var manual = existing ? oaPcManualExtra(existing) : 0;
+      // Kit need = OA PCs; stack on top of any qty the user already added.
+      var need = manual + n;
+      var total = Math.min(stock, need);
+      var autoQty = Math.max(0, total - manual);
+      if (need > stock) {
+        short.push(sku + " (need " + need + ", have " + stock + ")");
+      }
+
+      if (total === 0) {
+        if (existing) entries.splice(existingIdx, 1);
+        return;
+      }
+
       if (existing) {
-        var lockedManual = !existing.autoOaPc &&
-          existing.count !== existing._oaPcAutoQty &&
-          existing.count > want;
-        if (!lockedManual && existing.count !== want) {
-          existing.count = want;
-          existing.stock = stock;
-          existing.autoOaPc = true;
-          existing._oaPcAutoQty = want;
-        } else if (!lockedManual) {
-          existing.autoOaPc = true;
-          existing._oaPcAutoQty = want;
-          existing.stock = stock;
-        }
+        existing.count = total;
+        existing.stock = stock;
+        existing._oaPcManualExtra = manual;
+        existing._oaPcAutoQty = autoQty;
+        existing.autoOaPc = autoQty > 0 && manual === 0;
+        existing.sku = existing.sku || sku;
       } else {
         entries.push({
           kind: "bulk",
@@ -712,9 +783,10 @@
           sku: sku,
           category: category,
           stock: stock,
-          count: want,
-          autoOaPc: true,
-          _oaPcAutoQty: want,
+          count: total,
+          autoOaPc: manual === 0,
+          _oaPcAutoQty: autoQty,
+          _oaPcManualExtra: manual,
         });
       }
     });
@@ -748,29 +820,45 @@
       if (e.kind === "bulk" && e.itemId === itemId) existing = e;
     });
     var next = (existing ? existing.count : 0) + qty;
+    var kit = isOaPcKitSku(sku);
+    var prevManual = existing ? oaPcManualExtra(existing) : 0;
     if (next > stock) {
+      var addCap = stock - (existing ? existing.count : 0);
       if (existing) {
         existing.count = stock;
         existing.autoOaPc = false;
+        if (kit && addCap > 0) {
+          existing._oaPcManualExtra = prevManual + addCap;
+        }
       } else if (stock > 0) {
         entries.push({
           kind: "bulk", itemId: itemId, name: name, sku: sku,
           category: category, stock: stock, count: stock, autoOaPc: false,
+          _oaPcManualExtra: kit ? stock : 0,
+          _oaPcAutoQty: 0,
         });
       }
+      if (kit) clearSkipOaPcSku(sku);
       setStatus("Only " + stock + " × " + name + " on the shelf.", false);
       beep(false);
     } else if (existing) {
       existing.count = next;
       existing.stock = stock;
       existing.autoOaPc = false;
+      if (kit) {
+        existing._oaPcManualExtra = prevManual + qty;
+        clearSkipOaPcSku(sku);
+      }
       setStatus("Added: " + name + " (×" + existing.count + ")", true);
       beep(true);
     } else {
       entries.push({
         kind: "bulk", itemId: itemId, name: name, sku: sku,
         category: category, stock: stock, count: qty, autoOaPc: false,
+        _oaPcManualExtra: kit ? qty : 0,
+        _oaPcAutoQty: 0,
       });
+      if (kit) clearSkipOaPcSku(sku);
       setStatus("Added: " + name + " (×" + qty + ")", true);
       beep(true);
     }
@@ -840,9 +928,22 @@
         var minus = el("button", "count-btn", "−");
         minus.type = "button";
         minus.addEventListener("click", function () {
-          entry.autoOaPc = false;
-          if (entry.count > 1) entry.count -= 1;
-          else entries.splice(idx, 1);
+          if (entry.count > 1) {
+            entry.count -= 1;
+            if (isOaPcKitSku(entry.sku)) {
+              // Prefer trimming manual extras before cutting the OA kit portion.
+              var manual = oaPcManualExtra(entry);
+              if (manual > 0) entry._oaPcManualExtra = manual - 1;
+              else {
+                entry._oaPcManualExtra = 0;
+                skipOaPcSku(entry.sku);
+              }
+              entry.autoOaPc = false;
+            }
+          } else {
+            skipOaPcSku(entry.sku);
+            entries.splice(idx, 1);
+          }
           render();
           scanInput.focus();
         });
@@ -854,8 +955,12 @@
             beep(false);
             return;
           }
-          entry.autoOaPc = false;
           entry.count += 1;
+          if (isOaPcKitSku(entry.sku)) {
+            clearSkipOaPcSku(entry.sku);
+            entry._oaPcManualExtra = oaPcManualExtra(entry) + 1;
+            entry.autoOaPc = false;
+          }
           render();
           scanInput.focus();
         });
@@ -876,6 +981,7 @@
       rm.type = "button";
       rm.setAttribute("aria-label", "Remove row");
       rm.addEventListener("click", function () {
+        if (entry.kind === "bulk") skipOaPcSku(entry.sku);
         entries.splice(idx, 1);
         render();
         scanInput.focus();
@@ -929,6 +1035,8 @@
       if (e.kind === "bulk" && e.itemId === item.id) existing = e;
     });
     var stock = typeof item.quantity === "number" ? item.quantity : (item.stock || 0);
+    var sku = item.sku || "";
+    var kit = isOaPcKitSku(sku);
     if (existing) {
       var next = existing.count + addQty;
       if (isOut && next > existing.stock) {
@@ -936,7 +1044,13 @@
         beep(false);
         return;
       }
+      var prevManual = oaPcManualExtra(existing);
       existing.count = next;
+      if (kit) {
+        existing._oaPcManualExtra = prevManual + addQty;
+        existing.autoOaPc = false;
+        clearSkipOaPcSku(sku);
+      }
       setStatus("Added: " + existing.name + " (×" + existing.count + ")", true);
     } else {
       if (isOut && stock < 1) {
@@ -950,9 +1064,13 @@
         addQty = stock;
       }
       entries.push({
-        kind: "bulk", itemId: item.id, name: item.name, sku: item.sku || "",
+        kind: "bulk", itemId: item.id, name: item.name, sku: sku,
         category: item.category || "", stock: stock, count: addQty,
+        autoOaPc: false,
+        _oaPcManualExtra: kit ? addQty : 0,
+        _oaPcAutoQty: 0,
       });
+      if (kit) clearSkipOaPcSku(sku);
       setStatus("Added: " + item.name + " (×" + addQty + ")", true);
     }
     beep(true);
@@ -1202,7 +1320,7 @@
         addOptionToItemSelect(item);
         if (newItemName && !isAcc) newItemName.value = item.name || name;
         if (newItemBrand && item.brand) newItemBrand.value = item.brand;
-        // Keep the wired/wireless category selected (not Peripheral) so the UI stays clear.
+        // Keep the wired/wireless / LAN category selected so the UI stays clear.
         if (!isAcc) setNewCategoryValue(item.category || category);
         return item;
       })
@@ -1440,6 +1558,7 @@
 
   clearBtn.addEventListener("click", function () {
     entries = [];
+    skippedOaPcSkus = {};
     render();
     setStatus("", true);
     scanInput.focus();
@@ -1455,7 +1574,21 @@
       scanInput.focus();
     });
     condemnToggle.addEventListener("change", function () {
+      if (condemnToggle.checked) {
+        // Drop auto OA kit accessories so Condemnation can stay on (units only).
+        stripOaPcKitBulk();
+        loanToggle.checked = false;
+        setStatus(
+          "Condemnation: keyboard / mouse / LAN kit lines removed. " +
+          "Only scanned units will be written off.",
+          true
+        );
+      } else {
+        // Leaving condemnation — OA PC kit auto-add can run again.
+        OA_PC_KIT_SKUS.forEach(function (s) { delete skippedOaPcSkus[s]; });
+      }
       syncModeToggles();
+      render();
       scanInput.focus();
     });
     finishForm.addEventListener("submit", function (event) {
@@ -1470,7 +1603,7 @@
         event.preventDefault();
         setStatus("Only scanned units can " +
           (condemnToggle.checked ? "be condemned" : "go on loan") +
-          " — remove the keyboard/mouse rows (set their quantities back to 0).", false);
+          " — remove bulk rows with × (OA PC kit lines stay removed).", false);
         beep(false);
       } else if (!hasUnit) {
         event.preventDefault();

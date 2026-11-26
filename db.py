@@ -14,23 +14,45 @@ Model:
            tracked unit moved.
 """
 
+import re
 import sqlite3
 from datetime import datetime
 
 from flask import current_app, g
 
+# Kept for older call sites; UI categories come from app.IMPORT_ITEM_CHOICES.
 PRESET_CATEGORIES = [
-#    "PC / Laptop",
-#    "Monitor",
-#    "Printer",
-#    "Peripheral",
-#    "Network",
-#    "Cable",
-#    "Storage",
-#    "Accessory",
-#    "Mobile",
-#    "Other",
+    "OA PC",
+    "Ultra Slim PC",
+    "iMac",
+    "Laptop",
+    "Monitor",
+    "iPad",
+    "Keyboard (Wired)",
+    "Keyboard (Wireless)",
+    "Mouse (Wired)",
+    "Mouse (Wireless)",
+    "LAN Cable (3 Metres)",
+    "Cable",
+    "Speaker",
+    "Headset",
+    "Webcam",
+    "Printer",
+    "Network",
+    "Storage",
+    "Mobile",
+    "Accessory",
+    "Other",
 ]
+
+# Fixed accessory SKUs → category label (must match IMPORT_ITEM_CHOICES).
+ACCESSORY_SKU_CATEGORIES = {
+    "MS-WIRED": "Mouse (Wired)",
+    "MS-WIRELESS": "Mouse (Wireless)",
+    "KB-WIRED": "Keyboard (Wired)",
+    "KB-WIRELESS": "Keyboard (Wireless)",
+    "LAN-3M": "LAN Cable (3 Metres)",
+}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS items (
@@ -72,9 +94,9 @@ CREATE INDEX IF NOT EXISTS idx_units_status ON units (status);
 
 CREATE TABLE IF NOT EXISTS transactions (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    item_id    INTEGER NOT NULL REFERENCES items (id) ON DELETE CASCADE,
+    item_id    INTEGER REFERENCES items (id) ON DELETE SET NULL,
     unit_id    INTEGER REFERENCES units (id) ON DELETE SET NULL,
-    type       TEXT NOT NULL CHECK (type IN ('IN', 'OUT')),
+    type       TEXT NOT NULL CHECK (type IN ('IN', 'OUT', 'DELETE', 'EDIT')),
     quantity   INTEGER NOT NULL CHECK (quantity > 0),
     person     TEXT NOT NULL DEFAULT '',
     department TEXT NOT NULL DEFAULT '',
@@ -85,6 +107,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     condemned  INTEGER NOT NULL DEFAULT 0,
     follow_up  INTEGER NOT NULL DEFAULT 0,
     notes      TEXT NOT NULL DEFAULT '',
+    item_name  TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tx_item ON transactions (item_id);
@@ -190,6 +213,13 @@ def _migrate(db):
     v12 adds transactions.follow_up for stock-out batches that need
     a later chase (and triggers admin mail when custodian is blank).
     v13 adds tickets (cases) with auto numbers KCCITD-YYYYMMDD-NNN-IN/OUT.
+    v14 replaces broad “Peripheral” with specific categories (Mouse, Keyboard,
+    Cable, Speaker, Headset, Webcam, …) on fixed accessory SKUs and best-effort
+    rename of other Peripheral rows from the product name.
+    v15 aligns fixed accessory SKU categories with IMPORT_ITEM_CHOICES labels
+    (e.g. Mouse → Mouse (Wired), Cable → LAN Cable (3 Metres) for LAN-3M).
+    v16 widens transactions.type for DELETE / EDIT (stocked-in date), keeps
+    item_name snapshot, and uses ON DELETE SET NULL so history survives deletes.
     """
     version = db.execute("PRAGMA user_version").fetchone()[0]
     if version < 3:
@@ -302,4 +332,114 @@ def _migrate(db):
         CREATE INDEX IF NOT EXISTS idx_tickets_type ON tickets (type);
         """
     )
-    db.execute("PRAGMA user_version = 13")
+    # v14 — split Peripheral into specific categories.
+    if version < 14:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        for sku, cat in ACCESSORY_SKU_CATEGORIES.items():
+            db.execute(
+                "UPDATE items SET category = ?, updated_at = ? "
+                "WHERE sku = ? COLLATE NOCASE AND category <> ? COLLATE NOCASE",
+                (cat, now, sku, cat),
+            )
+        peripheral_rows = db.execute(
+            "SELECT id, name, model, sku FROM items "
+            "WHERE category = 'Peripheral' COLLATE NOCASE"
+        ).fetchall()
+        for r in peripheral_rows:
+            sku = (r["sku"] or "").upper()
+            if sku in ACCESSORY_SKU_CATEGORIES:
+                continue  # already handled
+            blob = f"{r['name'] or ''} {r['model'] or ''}".lower()
+            if re.search(r"\b(keyboards?)\b", blob):
+                cat = "Keyboard"
+            elif re.search(r"\b(mouse|mice)\b", blob):
+                cat = "Mouse"
+            elif re.search(r"\b(speakers?)\b", blob):
+                cat = "Speaker"
+            elif re.search(r"\b(headsets?|headphones?)\b", blob):
+                cat = "Headset"
+            elif re.search(r"\b(webcams?|web\s*cams?)\b", blob):
+                cat = "Webcam"
+            elif re.search(r"\b(cables?|lan|ethernet|cat\s*[56])\b", blob):
+                cat = "Cable"
+            else:
+                cat = "Accessory"
+            db.execute(
+                "UPDATE items SET category = ?, updated_at = ? WHERE id = ?",
+                (cat, now, r["id"]),
+            )
+        # Package checklist lines that matched the old broad category.
+        db.execute(
+            """UPDATE package_lines SET match_value = 'Accessory'
+               WHERE match_type = 'category'
+                 AND match_value = 'Peripheral' COLLATE NOCASE"""
+        )
+    # v15 — accessory SKU categories match Excel IMPORT_ITEM_CHOICES labels.
+    if version < 15:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        for sku, cat in ACCESSORY_SKU_CATEGORIES.items():
+            db.execute(
+                "UPDATE items SET category = ?, updated_at = ? "
+                "WHERE sku = ? COLLATE NOCASE AND category <> ? COLLATE NOCASE",
+                (cat, now, sku, cat),
+            )
+        # Short categories from v14 → wired/wireless defaults when unambiguous.
+        for old, new in (
+            ("Mouse", "Mouse (Wired)"),
+            ("Keyboard", "Keyboard (Wired)"),
+        ):
+            db.execute(
+                "UPDATE items SET category = ?, updated_at = ? "
+                "WHERE category = ? COLLATE NOCASE "
+                "AND (sku = '' OR UPPER(sku) NOT IN ('MS-WIRELESS','KB-WIRELESS'))",
+                (new, now, old),
+            )
+        db.execute(
+            "UPDATE items SET category = 'Mouse (Wireless)', updated_at = ? "
+            "WHERE category = 'Mouse' COLLATE NOCASE AND UPPER(sku) = 'MS-WIRELESS'",
+            (now,),
+        )
+        db.execute(
+            "UPDATE items SET category = 'Keyboard (Wireless)', updated_at = ? "
+            "WHERE category = 'Keyboard' COLLATE NOCASE AND UPPER(sku) = 'KB-WIRELESS'",
+            (now,),
+        )
+    # v16 — audit history: DELETE / EDIT types, item_name, survive item deletes.
+    if version < 16:
+        db.executescript(
+            """
+            CREATE TABLE transactions_v16 (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_id    INTEGER REFERENCES items (id) ON DELETE SET NULL,
+                unit_id    INTEGER REFERENCES units (id) ON DELETE SET NULL,
+                type       TEXT NOT NULL CHECK (type IN ('IN', 'OUT', 'DELETE', 'EDIT')),
+                quantity   INTEGER NOT NULL CHECK (quantity > 0),
+                person     TEXT NOT NULL DEFAULT '',
+                department TEXT NOT NULL DEFAULT '',
+                reference  TEXT NOT NULL DEFAULT '',
+                staff_id   TEXT NOT NULL DEFAULT '',
+                site       TEXT NOT NULL DEFAULT '',
+                on_loan    INTEGER NOT NULL DEFAULT 0,
+                condemned  INTEGER NOT NULL DEFAULT 0,
+                follow_up  INTEGER NOT NULL DEFAULT 0,
+                notes      TEXT NOT NULL DEFAULT '',
+                item_name  TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            INSERT INTO transactions_v16 (
+                id, item_id, unit_id, type, quantity, person, department, reference,
+                staff_id, site, on_loan, condemned, follow_up, notes, item_name, created_at
+            )
+            SELECT t.id, t.item_id, t.unit_id, t.type, t.quantity, t.person, t.department,
+                   t.reference, t.staff_id, t.site, t.on_loan, t.condemned, t.follow_up,
+                   t.notes, COALESCE(i.name, ''), t.created_at
+            FROM transactions t
+            LEFT JOIN items i ON i.id = t.item_id;
+            DROP TABLE transactions;
+            ALTER TABLE transactions_v16 RENAME TO transactions;
+            CREATE INDEX IF NOT EXISTS idx_tx_item ON transactions (item_id);
+            CREATE INDEX IF NOT EXISTS idx_tx_created ON transactions (created_at);
+            CREATE INDEX IF NOT EXISTS idx_tx_unit ON transactions (unit_id);
+            """
+        )
+    db.execute("PRAGMA user_version = 16")

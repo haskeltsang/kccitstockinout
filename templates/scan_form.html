@@ -178,8 +178,9 @@
       <p class="hint">No untagged stock on the shelf. Import Tagged=No rows or add keyboards/mice on Import.</p>
       {% else %}
       <p class="hint">Pick any untagged product (keyboard, mouse, LAN cable, etc.) and a quantity.
-        Scanning an OA PC / desktop PC still auto-adds 1 wired keyboard, 1 wired mouse,
-        and 1 × 3m LAN cable per PC.</p>
+        Scanning an OA PC / desktop PC auto-adds 1 wired keyboard, 1 wired mouse,
+        and 1 × 3m LAN cable per PC — use × to drop those lines (e.g. when condemning the PC only).
+        Turning on <strong>Condemnation</strong> removes the kit lines automatically.</p>
       {% endif %}
       {# Metadata for OA PC auto KB/MS/LAN — not shown as fixed qty boxes anymore. #}
       <div id="accessory-sku-data" hidden aria-hidden="true">
@@ -189,7 +190,7 @@
               data-sku="{{ sku }}"
               data-item-id="{{ it['id'] if it else '' }}"
               data-name="{{ it['name'] if it else sku }}"
-              data-category="{{ it['category'] if it else 'Peripheral' }}"
+              data-category="{{ it['category'] if it else '' }}"
               data-qty="{{ it['quantity'] if it else 0 }}"></span>
         {% endfor %}
       </div>

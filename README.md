@@ -5,6 +5,9 @@ peripherals, cables and any other equipment as it moves **in** to the storeroom
 (supplier deliveries, returns) and **out** to colleagues (new joiners,
 replacements, event kits).
 
+**End-user how-to:** see [USER_GUIDE.md](USER_GUIDE.md) (stock in/out, tickets,
+packages, import).
+
 Built with Python + Flask + SQLite. It runs on a **Windows 11 PC without admin
 rights** — no installer, no database server, no services. Everything is stored
 in a single `stock.db` file next to the app.
@@ -17,10 +20,9 @@ Two kinds of stock, side by side:
   printer has its own **serial number** and a **unique EAM tag**, and a status
   of *on the shelf* or *checked out* (and who has it). Scanning a tag always
   identifies one specific unit.
-- **Untagged stock** — keyboards and mice only (wired or wireless), tracked
-  by quantity. Top them up on the **Import** page and move them on the scan
-  pages by typing their SKU: `MS-WIRED`, `MS-WIRELESS`, `KB-WIRED`,
-  `KB-WIRELESS`.
+- **Untagged stock** — quantity items (keyboards, mice, cables, speakers,
+  etc.) under specific categories. Standard KB/MS/LAN use fixed SKUs:
+  `MS-WIRED`, `MS-WIRELESS`, `KB-WIRED`, `KB-WIRELESS`, `LAN-3M`.
 
 An item's *In stock* number is tracked units on the shelf plus untagged stock.
 

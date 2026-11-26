@@ -38,19 +38,24 @@
   </div>
 
   {% if on_shelf %}
-  <div class="section-label">
-    <h2>Units on the shelf</h2>
-    <span class="muted small">{{ on_shelf | length }} product{{ 's' if on_shelf | length != 1 }} with tracked units</span>
-  </div>
-  <div class="stat-grid shelf-stats">
-    {% for it in on_shelf %}
-    <a class="card stat shelf-stat" href="{{ url_for('item_detail', item_id=it["id"]) }}">
-      <span class="stat-label">{{ it["name"] }}</span>
-      <span class="stat-value {{ 'danger' if it["on_shelf"] == 0 }}">{{ it["on_shelf"] }}</span>
-      <span class="stat-sub">{{ it["category"] }}{% if it["brand"] %} · {{ it["brand"] }}{% endif %}{% if it["model"] %} · {{ it["model"] }}{% endif %} · on shelf</span>
-    </a>
-    {% endfor %}
-  </div>
+  <section class="shelf-section" id="shelf-section" data-collapse-key="dash-shelf">
+    <div class="section-label">
+      <h2>Units on the shelf</h2>
+      <span class="muted small">{{ on_shelf | length }} product{{ 's' if on_shelf | length != 1 }} with tracked units</span>
+      <button type="button" class="section-collapse-btn" id="shelf-collapse-btn"
+              aria-expanded="true" aria-controls="shelf-section-body"
+              title="Hide this section">−</button>
+    </div>
+    <div class="stat-grid shelf-stats" id="shelf-section-body">
+      {% for it in on_shelf %}
+      <a class="card stat shelf-stat" href="{{ url_for('item_detail', item_id=it['id']) }}">
+        <span class="stat-label">{{ it["name"] }}</span>
+        <span class="stat-value {{ 'danger' if it["on_shelf"] == 0 }}">{{ it["on_shelf"] }}</span>
+        <span class="stat-sub">{{ it["category"] }}{% if it["brand"] %} · {{ it["brand"] }}{% endif %}{% if it["model"] %} · {{ it["model"] }}{% endif %} · on shelf</span>
+      </a>
+      {% endfor %}
+    </div>
+  </section>
   {% endif %}
 
   <div class="dash-grid">
@@ -67,9 +72,19 @@
         <tbody>
           {% for t in recent %}
           <tr>
-            <td><span class="pill {{ 'pill-in' if t["type"] == 'IN' else 'pill-out' }}">{{ 'In' if t["type"] == 'IN' else 'Out' }}</span></td>
             <td>
-              <a class="item-name" href="{{ url_for('item_detail', item_id=t["item_id"]) }}">{{ t["item_name"] }}</a>
+              {% if t["type"] == "IN" %}<span class="pill pill-in">In</span>
+              {% elif t["type"] == "OUT" %}<span class="pill pill-out">Out</span>
+              {% elif t["type"] == "DELETE" %}<span class="pill pill-delete">Delete</span>
+              {% elif t["type"] == "EDIT" %}<span class="pill pill-edit">Edit</span>
+              {% else %}<span class="pill">{{ t["type"] }}</span>{% endif %}
+            </td>
+            <td>
+              {% if t["item_id"] %}
+              <a class="item-name" href="{{ url_for('item_detail', item_id=t['item_id']) }}">{{ t["item_name"] or '—' }}</a>
+              {% else %}
+              <span class="muted">{{ t["item_name"] or '—' }}</span>
+              {% endif %}
               {% if t["unit_eam"] or t["unit_serial"] %}
               <div class="muted small mono">
                 {%- if t["unit_eam"] %}EAM {{ t["unit_eam"] }}{% endif -%}
@@ -78,7 +93,11 @@
               </div>
               {% endif %}
             </td>
-            <td class="num"><span class="{{ 'qty-in' if t["type"] == 'IN' else 'qty-out' }}">{{ '+' if t["type"] == 'IN' else '−' }}{{ t["quantity"] }}</span></td>
+            <td class="num">
+              {% if t["type"] == "IN" %}<span class="qty-in">+{{ t["quantity"] }}</span>
+              {% elif t["type"] == "OUT" %}<span class="qty-out">−{{ t["quantity"] }}</span>
+              {% else %}<span class="muted">{{ t["quantity"] }}</span>{% endif %}
+            </td>
             <td>{{ t["person"] or '—' }}</td>
             <td class="muted nowrap">{{ t["created_at"] }}</td>
           </tr>

@@ -57,7 +57,9 @@
           <input class="input" id="item-model" name="model" maxlength="120" required
                  value="{{ item['model'] or item['name'] }}"
                  placeholder="e.g. ThinkCentre M70">
-          <p class="hint">Also used as the product name in lists and stock pages.</p>
+          <p class="hint">Also used as the product name in lists and stock pages.
+            If this category + model already exists (e.g. fixing an “Other” import),
+            saving merges this product into that one.</p>
         </div>
         <div class="form-actions">
           <button class="btn btn-ghost" type="submit">Save category &amp; model</button>
@@ -77,33 +79,6 @@
       <p class="hint">The dashboard alerts you when available stock (untagged + tagged units on
         the shelf) drops to this number or below. 0 turns the alert off.</p>
     </form>
-
-    {% if merge_candidates %}
-    <form method="post" action="{{ url_for('merge_item', item_id=item['id']) }}" class="item-merge-form"
-          data-confirm="Merge the selected product into this one? Its stock, units and history move here, then the duplicate is deleted. This can’t be undone.">
-      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <div class="card-head" style="padding:0;margin:12px 0 8px">
-        <h2>Merge duplicate into this product</h2>
-      </div>
-      <div class="field">
-        <label for="merge-source">Duplicate to absorb</label>
-        <select class="input" id="merge-source" name="source_id" required>
-          <option value="" selected disabled>Choose the typo / duplicate…</option>
-          {% for m in merge_candidates %}
-          <option value="{{ m['id'] }}">
-            {{ m["category"] }} · {{ m["name"] }}{% if m["sku"] %} ({{ m["sku"] }}){% endif %}
-            — {{ m["quantity"] + m["units_in"] }} on hand{% if m["units_out"] %}, {{ m["units_out"] }} out{% endif %}
-          </option>
-          {% endfor %}
-        </select>
-        <p class="hint">Example: keep <em>LAN Cable (5m)</em> open, merge <em>LAN Cable (5 m)</em> into it.
-          This product’s category and model stay; the other row is removed.</p>
-      </div>
-      <div class="form-actions">
-        <button class="btn btn-ghost" type="submit">Merge into this product</button>
-      </div>
-    </form>
-    {% endif %}
   </section>
   <div class="stat-col">
     <div class="card stat">
@@ -206,10 +181,22 @@
       {% for t in history %}
       <tr>
         <td class="nowrap">{{ t["created_at"] }}</td>
-        <td><span class="pill {{ 'pill-in' if t["type"] == 'IN' else 'pill-out' }}">{{ 'In' if t["type"] == 'IN' else 'Out' }}</span>{% if t["on_loan"] %}<span class="pill pill-loan">On loan</span>{% endif %}{% if t["condemned"] %}<span class="pill pill-condemn">Condemned</span>{% endif %}</td>
+        <td>
+          {% if t["type"] == "IN" %}<span class="pill pill-in">In</span>
+          {% elif t["type"] == "OUT" %}<span class="pill pill-out">Out</span>
+          {% elif t["type"] == "DELETE" %}<span class="pill pill-delete">Delete</span>
+          {% elif t["type"] == "EDIT" %}<span class="pill pill-edit">Edit</span>
+          {% else %}<span class="pill">{{ t["type"] }}</span>{% endif %}
+          {% if t["on_loan"] %}<span class="pill pill-loan">On loan</span>{% endif %}
+          {% if t["condemned"] %}<span class="pill pill-condemn">Condemned</span>{% endif %}
+        </td>
         <td class="mono">{{ t["unit_eam"] or '—' }}</td>
         <td class="mono">{{ t["unit_serial"] or '—' }}</td>
-        <td class="num"><span class="{{ 'qty-in' if t["type"] == 'IN' else 'qty-out' }}">{{ '+' if t["type"] == 'IN' else '−' }}{{ t["quantity"] }}</span></td>
+        <td class="num">
+          {% if t["type"] == "IN" %}<span class="qty-in">+{{ t["quantity"] }}</span>
+          {% elif t["type"] == "OUT" %}<span class="qty-out">−{{ t["quantity"] }}</span>
+          {% else %}<span class="muted">{{ t["quantity"] }}</span>{% endif %}
+        </td>
         <td>{{ t["person"] or '—' }}</td>
         <td>{{ t["department"] or '—' }}</td>
         <td class="mono">{{ t["reference"] or '—' }}</td>
